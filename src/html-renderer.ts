@@ -1062,6 +1062,15 @@ section.${c}>footer { z-index: 1; }
 		if (this.document) {
 			this.tasks.push(this.document.loadDocumentImage(elem.src, this.currentPart).then(x => {
 				result.src = x;
+				if (this.options.onImageRendered && elem.docPrId) {
+					result.onload = () => {
+						this.options.onImageRendered({
+							docPrId: elem.docPrId,
+							imgEl: result,
+							naturalSize: { width: result.naturalWidth, height: result.naturalHeight }
+						});
+					};
+				}
 			}));
 		}
 

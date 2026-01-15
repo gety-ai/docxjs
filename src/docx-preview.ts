@@ -22,6 +22,11 @@ export interface Options {
 	renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    onImageRendered?: (payload: {
+        docPrId: string;
+        imgEl: HTMLImageElement;
+        naturalSize: { width: number; height: number };
+    }) => void;
 }
 
 export const defaultOptions: Options = {

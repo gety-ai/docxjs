@@ -141,6 +141,7 @@ export interface IDomImage extends OpenXmlElement {
     src: string;
     srcRect: number[];
     rotation: number;
+    docPrId?: string;
 }
 
 export interface WmlTableColumn {

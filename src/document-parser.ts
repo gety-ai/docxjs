@@ -855,6 +855,7 @@ export class DocumentParser {
 		let wrapType: "wrapTopAndBottom" | "wrapNone" | null = null;
 		let simplePos = xml.boolAttr(node, "simplePos");
 		let behindDoc = xml.boolAttr(node, "behindDoc");
+		let docPrId: string | null = null;
 
 		let posX = { relative: "page", align: "left", offset: "0" };
 		let posY = { relative: "page", align: "top", offset: "0" };
@@ -871,6 +872,10 @@ export class DocumentParser {
 				case "extent":
 					result.cssStyle["width"] = xml.lengthAttr(n, "cx", LengthUsage.Emu);
 					result.cssStyle["height"] = xml.lengthAttr(n, "cy", LengthUsage.Emu);
+					break;
+
+				case "docPr":
+					docPrId = xml.attr(n, "id");
 					break;
 
 				case "positionH":
@@ -901,8 +906,12 @@ export class DocumentParser {
 				case "graphic":
 					var g = this.parseGraphic(n);
 
-					if (g)
+					if (g) {
+						if (docPrId && g.type === DomType.Image) {
+							(g as IDomImage).docPrId = docPrId;
+						}
 						result.children.push(g);
+					}
 					break;
 			}
 		}

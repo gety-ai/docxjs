@@ -2057,6 +2057,7 @@
             let wrapType = null;
             let simplePos = globalXmlParser.boolAttr(node, "simplePos");
             globalXmlParser.boolAttr(node, "behindDoc");
+            let docPrId = null;
             let posX = { relative: "page", align: "left", offset: "0" };
             let posY = { relative: "page", align: "top", offset: "0" };
             for (var n of globalXmlParser.elements(node)) {
@@ -2070,6 +2071,9 @@
                     case "extent":
                         result.cssStyle["width"] = globalXmlParser.lengthAttr(n, "cx", LengthUsage.Emu);
                         result.cssStyle["height"] = globalXmlParser.lengthAttr(n, "cy", LengthUsage.Emu);
+                        break;
+                    case "docPr":
+                        docPrId = globalXmlParser.attr(n, "id");
                         break;
                     case "positionH":
                     case "positionV":
@@ -2092,8 +2096,12 @@
                         break;
                     case "graphic":
                         var g = this.parseGraphic(n);
-                        if (g)
+                        if (g) {
+                            if (docPrId && g.type === DomType.Image) {
+                                g.docPrId = docPrId;
+                            }
                             result.children.push(g);
+                        }
                         break;
                 }
             }
@@ -3561,6 +3569,15 @@ section.${c}>footer { z-index: 1; }
             if (this.document) {
                 this.tasks.push(this.document.loadDocumentImage(elem.src, this.currentPart).then(x => {
                     result.src = x;
+                    if (this.options.onImageRendered && elem.docPrId) {
+                        result.onload = () => {
+                            this.options.onImageRendered({
+                                docPrId: elem.docPrId,
+                                imgEl: result,
+                                naturalSize: { width: result.naturalWidth, height: result.naturalHeight }
+                            });
+                        };
+                    }
                 }));
             }
             return result;
