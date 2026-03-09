@@ -24,6 +24,11 @@ export interface Options {
     renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    onImageRendered?: (payload: {
+        docPrId: string;
+        imgEl: HTMLImageElement;
+        naturalSize: { width: number; height: number };
+    }) => void;
 }
 //stub
 export type WordDocument = any;
