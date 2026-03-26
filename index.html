@@ -1,161 +1,312 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
+    <head>
+        <meta charset="UTF-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover"
+        />
+        <link
+            href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"
+            rel="stylesheet"
+            integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3"
+            crossorigin="anonymous"
+        />
+        <script
+            src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"
+            integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p"
+            crossorigin="anonymous"
+        ></script>
+        <!--library-->
+        <script src="dist/docx-preview.js"></script>
+        <!--thumbnail example-->
+        <script src="./demo/thumbnail.example.js"></script>
+        <link href="./demo/thumbnail.example.css" rel="stylesheet" />
+        <script
+            crossorigin
+            src="https://unpkg.com/fflate@0.8.2/umd/index.js"
+        ></script>
+        <script
+            crossorigin
+            src="https://unpkg.com/tiff.js@1.0.0/tiff.min.js"
+        ></script>
+        <script src="./demo/tiff-preprocessor.js"></script>
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover" />
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet"
-        integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3" crossorigin="anonymous">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p"
-        crossorigin="anonymous"></script>
-    <!--dependencies-->
-    <script crossorigin src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
-    <!--library-->
-    <script src="dist/docx-preview.js"></script>
-    <!--thumbnail example-->
-    <script src="./demo/thumbnail.example.js"></script>
-    <link href="./demo/thumbnail.example.css" rel="stylesheet">
-    <script crossorigin src="https://unpkg.com/tiff.js@1.0.0/tiff.min.js"></script>
-    <script src="./demo/tiff-preprocessor.js"></script>
+        <style>
+            @media print {
+                .no-print {
+                    display: none;
+                }
 
-    <style>
-        @media print {
-            .no-print {
+                .overflow-auto {
+                    overflow: initial !important;
+                }
+            }
+
+            #document-pane {
+                position: relative;
+            }
+
+            #loading-overlay {
+                position: absolute;
+                inset: 0;
                 display: none;
+                align-items: center;
+                justify-content: center;
+                background: rgba(248, 249, 250, 0.82);
+                backdrop-filter: blur(2px);
+                z-index: 20;
             }
 
-            .overflow-auto {
-                overflow: initial !important;
+            #loading-overlay.is-visible {
+                display: flex;
             }
-        }
-    </style>
-</head>
 
-<body class="vh-100 d-flex flex-column">
-    <div class="hstack bg-black no-print">
-        <a class="mx-auto p-2 text-white" href="https://war.ukraine.ua">Support Ukraine 🇺🇦</a>
-    </div>
+            .loading-card {
+                min-width: 18rem;
+                padding: 1rem 1.25rem;
+                border-radius: 1rem;
+                background: rgba(255, 255, 255, 0.96);
+                box-shadow: 0 1rem 2.5rem rgba(15, 23, 42, 0.16);
+            }
+        </style>
+    </head>
 
-    <div class="hstack p-2 gap-2 bg-light no-print">
-
-        <input id="files" type="file" class="form-control" style="width: 50ch;" accept=".docx" />
-        <div class="col-2">
-            <select id="testDocuments" class="form-select">
-                <option disabled selected>-- Test Documents --</option>
-            </select>
+    <body class="vh-100 d-flex flex-column">
+        <div class="hstack bg-black no-print">
+            <a class="mx-auto p-2 text-white" href="https://war.ukraine.ua"
+                >Support Ukraine 🇺🇦</a
+            >
         </div>
-        <button id="loadButton" class="btn btn-primary px-4">Reload</button>
-        <div class="dropdown">
-            <button class="btn btn-secondary dropdown-toggle" type="button" id="optionsMenuButton"
-                data-bs-toggle="dropdown" aria-expanded="false">
-                Options
+
+        <div class="hstack p-2 gap-2 bg-light no-print">
+            <input
+                id="files"
+                type="file"
+                class="form-control"
+                style="width: 50ch"
+                accept=".docx"
+            />
+            <div class="col-2">
+                <select id="testDocuments" class="form-select">
+                    <option disabled selected>-- Test Documents --</option>
+                </select>
+            </div>
+            <button id="loadButton" class="btn btn-primary px-4">Reload</button>
+            <div class="dropdown">
+                <button
+                    class="btn btn-secondary dropdown-toggle"
+                    type="button"
+                    id="optionsMenuButton"
+                    data-bs-toggle="dropdown"
+                    aria-expanded="false"
+                >
+                    Options
+                </button>
+                <ul
+                    id="optionsMenu"
+                    class="dropdown-menu"
+                    aria-labelledby="optionsMenuButton"
+                ></ul>
+            </div>
+            <button
+                id="saveTestButton"
+                class="btn btn-primary px-4"
+                style="display: none"
+            >
+                Save Test
             </button>
-            <ul id="optionsMenu" class="dropdown-menu" aria-labelledby="optionsMenuButton">
-            </ul>
         </div>
-        <button id="saveTestButton" class="btn btn-primary px-4" style="display: none">Save Test</button>
-    </div>
 
-    <div class="flex-grow-1 d-flex flex-row" style="height: 0;">
-        <details class="docx-thumbnails h-100 no-print">
-            <summary></summary>
-            <div id="thumbnails-container" class="docx-thumbnails-container"></div>
-        </details>
-        <div id="document-container" class="overflow-auto flex-grow-1 h-100"></div>
-    </div>
+        <div class="flex-grow-1 d-flex flex-row" style="height: 0">
+            <details class="docx-thumbnails h-100 no-print">
+                <summary></summary>
+                <div
+                    id="thumbnails-container"
+                    class="docx-thumbnails-container"
+                ></div>
+            </details>
+            <div id="document-pane" class="flex-grow-1 h-100">
+                <div id="loading-overlay" class="no-print">
+                    <div class="loading-card">
+                        <div class="d-flex align-items-center gap-3">
+                            <div
+                                class="spinner-border text-primary"
+                                role="status"
+                                aria-hidden="true"
+                            ></div>
+                            <div>
+                                <div class="fw-semibold">
+                                    Rendering document
+                                </div>
+                                <div
+                                    id="loading-message"
+                                    class="text-muted small"
+                                >
+                                    Preparing preview...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="document-container" class="overflow-auto h-100"></div>
+            </div>
+        </div>
 
-    <script>
-        let currentDocument = null;
-        const docxOptions = Object.assign(docx.defaultOptions, {
-            debug: true,
-            experimental: true,
-            hideWrapperOnPrint: true
-        });
+        <script>
+            let currentDocument = null;
+            const docxOptions = Object.assign(docx.defaultOptions, {
+                debug: true,
+                experimental: true,
+                hideWrapperOnPrint: true,
+                virtualizePages: true,
+                useWorkerParser: true,
+                mergeAdjacent: false,
+            });
 
-        const container = document.querySelector("#document-container");
-        const fileInput = document.querySelector("#files");
-        const loadButton = document.querySelector("#loadButton");
-        const testDocuments = document.querySelector("#testDocuments");
+            const container = document.querySelector("#document-container");
+            const loadingOverlay = document.querySelector("#loading-overlay");
+            const loadingMessage = document.querySelector("#loading-message");
+            const fileInput = document.querySelector("#files");
+            const loadButton = document.querySelector("#loadButton");
+            const testDocuments = document.querySelector("#testDocuments");
 
-        async function renderDocx(file) {
-            currentDocument = file; 
+            async function renderDocx(file) {
+                currentDocument = file;
 
-            if (!currentDocument) 
-                return;
-            
-            // optional, find and convert all tiff images 
-            let docxBlob = preprocessTiff(currentDocument); 
-            // render document
-            let res = await docx.renderAsync(docxBlob, container, null, docxOptions)
-            // optional - render thumbnails
-            renderThumbnails(container, document.querySelector("#thumbnails-container"));
-            console.log(res);
-        }
-        
-        fileInput.addEventListener("change", ev => {
-            renderDocx(fileInput.files[0]);
-            testDocuments.selectedIndex = 0;
-        });
-        loadButton.addEventListener("click", ev => renderDocx(fileInput.files[0]));
+                if (!currentDocument) return;
 
-        const menu = document.querySelector("#optionsMenu");
+                setLoadingState(true, "Preparing document...");
 
-        Object.keys(docxOptions).filter(key => !/className/i.test(key)).forEach(function(key) {
-            const listItem = document.createElement("li");
-            listItem.innerHTML = `
+                try {
+                    // optional, find and convert all tiff images
+                    let docxBlob = preprocessTiff(currentDocument);
+                    setLoadingState(true, "Parsing and rendering...");
+                    let res = await docx.renderAsync(
+                        docxBlob,
+                        container,
+                        null,
+                        docxOptions,
+                    );
+                    renderThumbnails(
+                        container,
+                        document.querySelector("#thumbnails-container"),
+                    );
+                    console.log(res);
+                } catch (error) {
+                    console.error(error);
+                    alert(
+                        `Failed to render document: ${error?.message ?? error}`,
+                    );
+                } finally {
+                    setLoadingState(false);
+                }
+            }
+
+            fileInput.addEventListener("change", (ev) => {
+                renderDocx(fileInput.files[0]);
+                testDocuments.selectedIndex = 0;
+            });
+            loadButton.addEventListener("click", (ev) =>
+                renderDocx(fileInput.files[0]),
+            );
+
+            const menu = document.querySelector("#optionsMenu");
+
+            Object.keys(docxOptions)
+                .filter((key) => !/className/i.test(key))
+                .forEach(function (key) {
+                    const listItem = document.createElement("li");
+                    listItem.innerHTML = `
             <div class="dropdown-item">
                 <div class="form-check">
-                    <label class="form-check-name"><input type="checkbox" class="form-check-input" ${docxOptions[key] ? 'checked' : ''}> ${key}</label>
+                    <label class="form-check-name"><input type="checkbox" class="form-check-input" ${docxOptions[key] ? "checked" : ""}> ${key}</label>
                 </div>
             </div>`;
 
-            const checkInput = listItem.querySelector("input");
+                    const checkInput = listItem.querySelector("input");
 
-            checkInput.addEventListener("click", (e) => {
-                docxOptions[key] = checkInput.checked;
-                renderDocx(currentDocument);
+                    checkInput.addEventListener("click", (e) => {
+                        docxOptions[key] = checkInput.checked;
+                        renderDocx(currentDocument);
+                    });
+
+                    menu.appendChild(listItem);
+                });
+
+            container.addEventListener("dragover", (ev) => ev.preventDefault());
+            container.addEventListener("drop", (ev) => {
+                ev.preventDefault();
+                renderDocx(ev.dataTransfer.files[0]);
             });
 
-            menu.appendChild(listItem);
-        });
+            const selectedTest = new URLSearchParams(location.search).get(
+                "test",
+            );
 
-        container.addEventListener("dragover", ev => ev.preventDefault());
-        container.addEventListener("drop", ev => {
-            ev.preventDefault();
-            renderDocx(ev.dataTransfer.files[0]);
-        });
-
-        const selectedTest = new URLSearchParams(location.search).get('test');
-
-        for (let testName of ['text','underlines','text-break','line-spacing','numbering','page-layout','table','table-spans','footnote','header-footer','revision','equation'])
-        {
-            var op = document.createElement("option");
-            op.value = testName;
-            op.label = testName;
-            op.selected = testName == selectedTest;
-            testDocuments.add(op);
-        }
-
-        testDocuments.addEventListener("change", e => tryLoadTest(testDocuments.value));
-
-        tryLoadTest(selectedTest);
-
-        document.querySelector("#saveTestButton").addEventListener("click", async () => {
-            const file = await showSaveFilePicker({ types: [ { description: "HTML File", accept: { "text/html": [".html"] } }] });
-            const stream = await file.createWritable();
-            await stream.write(container.innerHTML);
-            await stream.close();
-        });
-
-        async function tryLoadTest(testName) {
-            if (testName) {
-                let resp = await fetch(`tests/render-test/${testName}/document.docx`);
-                renderDocx(await resp.blob());
-                fileInput.value = "";
+            for (let testName of [
+                "text",
+                "underlines",
+                "text-break",
+                "line-spacing",
+                "numbering",
+                "page-layout",
+                "table",
+                "table-spans",
+                "footnote",
+                "header-footer",
+                "revision",
+                "equation",
+            ]) {
+                var op = document.createElement("option");
+                op.value = testName;
+                op.label = testName;
+                op.selected = testName == selectedTest;
+                testDocuments.add(op);
             }
-        }
-    </script>
-</body>
 
+            testDocuments.addEventListener("change", (e) =>
+                tryLoadTest(testDocuments.value),
+            );
+
+            tryLoadTest(selectedTest);
+
+            document
+                .querySelector("#saveTestButton")
+                .addEventListener("click", async () => {
+                    const file = await showSaveFilePicker({
+                        types: [
+                            {
+                                description: "HTML File",
+                                accept: { "text/html": [".html"] },
+                            },
+                        ],
+                    });
+                    const stream = await file.createWritable();
+                    await stream.write(container.innerHTML);
+                    await stream.close();
+                });
+
+            async function tryLoadTest(testName) {
+                if (testName) {
+                    let resp = await fetch(
+                        `tests/render-test/${testName}/document.docx`,
+                    );
+                    renderDocx(await resp.blob());
+                    fileInput.value = "";
+                }
+            }
+
+            function setLoadingState(
+                isLoading,
+                message = "Preparing preview...",
+            ) {
+                loadingMessage.textContent = message;
+                loadingOverlay.classList.toggle("is-visible", isLoading);
+                fileInput.disabled = isLoading;
+                loadButton.disabled = isLoading;
+                testDocuments.disabled = isLoading;
+            }
+        </script>
+    </body>
 </html>
