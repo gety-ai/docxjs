@@ -5,10 +5,10 @@
  * Copyright Volodymyr Baydalka
  */
 (function (global, factory) {
-    typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports, require('jszip')) :
-    typeof define === 'function' && define.amd ? define(['exports', 'jszip'], factory) :
-    (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.docx = {}, global.JSZip));
-})(this, (function (exports, JSZip) { 'use strict';
+    typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+    typeof define === 'function' && define.amd ? define(['exports'], factory) :
+    (global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.docx = {}));
+})(this, (function (exports) { 'use strict';
 
     var RelationshipTypes;
     (function (RelationshipTypes) {
@@ -175,17 +175,19 @@
     class XmlParser {
         elements(elem, localName = null) {
             const result = [];
-            for (let i = 0, l = elem.childNodes.length; i < l; i++) {
-                let c = elem.childNodes.item(i);
-                if (c.nodeType == Node.ELEMENT_NODE && (localName == null || c.localName == localName))
+            const childNodes = getChildNodes(elem);
+            for (let i = 0, l = childNodes.length; i < l; i++) {
+                let c = childNodes[i];
+                if (isElementNode(c) && (localName == null || getLocalName(c) == localName))
                     result.push(c);
             }
             return result;
         }
         element(elem, localName) {
-            for (let i = 0, l = elem.childNodes.length; i < l; i++) {
-                let c = elem.childNodes.item(i);
-                if (c.nodeType == 1 && c.localName == localName)
+            const childNodes = getChildNodes(elem);
+            for (let i = 0, l = childNodes.length; i < l; i++) {
+                let c = childNodes[i];
+                if (isElementNode(c) && getLocalName(c) == localName)
                     return c;
             }
             return null;
@@ -195,11 +197,12 @@
             return el ? this.attr(el, attrLocalName) : undefined;
         }
         attrs(elem) {
-            return Array.from(elem.attributes);
+            return getAttributes(elem);
         }
         attr(elem, localName) {
-            for (let i = 0, l = elem.attributes.length; i < l; i++) {
-                let a = elem.attributes.item(i);
+            const attributes = getAttributes(elem);
+            for (let i = 0, l = attributes.length; i < l; i++) {
+                let a = attributes[i];
                 if (a.localName == localName)
                     return a.value;
             }
@@ -225,6 +228,26 @@
         }
     }
     const globalXmlParser = new XmlParser();
+    function getChildNodes(elem) {
+        if (!elem?.childNodes)
+            return [];
+        if (Array.isArray(elem.childNodes))
+            return elem.childNodes;
+        return Array.from(elem.childNodes);
+    }
+    function getAttributes(elem) {
+        if (!elem?.attributes)
+            return [];
+        if (Array.isArray(elem.attributes))
+            return elem.attributes;
+        return Array.from(elem.attributes);
+    }
+    function isElementNode(node) {
+        return node?.nodeType == 1 || (typeof node?.localName == "string" && typeof node?.nodeName == "string");
+    }
+    function getLocalName(node) {
+        return node?.localName ?? node?.nodeName?.split?.(":")?.pop?.();
+    }
 
     class Part {
         constructor(_package, path) {
@@ -293,28 +316,1111 @@
         }
     }
 
+    // DEFLATE is a complex format; to read this code, you should probably check the RFC first:
+    // https://tools.ietf.org/html/rfc1951
+    // You may also wish to take a look at the guide I made about this program:
+    // https://gist.github.com/101arrowz/253f31eb5abc3d9275ab943003ffecad
+    // Some of the following code is similar to that of UZIP.js:
+    // https://github.com/photopea/UZIP.js
+    // However, the vast majority of the codebase has diverged from UZIP.js to increase performance and reduce bundle size.
+    // Sometimes 0 will appear where -1 would be more appropriate. This is because using a uint
+    // is better for memory in most engines (I *think*).
+
+    // aliases for shorter compressed code (most minifers don't do this)
+    var u8 = Uint8Array, u16 = Uint16Array, i32 = Int32Array;
+    // fixed length extra bits
+    var fleb = new u8([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, /* unused */ 0, 0, /* impossible */ 0]);
+    // fixed distance extra bits
+    var fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, /* unused */ 0, 0]);
+    // code length index map
+    var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+    // get base, reverse index map from extra bits
+    var freb = function (eb, start) {
+        var b = new u16(31);
+        for (var i = 0; i < 31; ++i) {
+            b[i] = start += 1 << eb[i - 1];
+        }
+        // numbers here are at max 18 bits
+        var r = new i32(b[30]);
+        for (var i = 1; i < 30; ++i) {
+            for (var j = b[i]; j < b[i + 1]; ++j) {
+                r[j] = ((j - b[i]) << 5) | i;
+            }
+        }
+        return { b: b, r: r };
+    };
+    var _a = freb(fleb, 2), fl = _a.b, revfl = _a.r;
+    // we can ignore the fact that the other numbers are wrong; they never happen anyway
+    fl[28] = 258, revfl[258] = 28;
+    var _b = freb(fdeb, 0), fd = _b.b, revfd = _b.r;
+    // map of value to reverse (assuming 16 bits)
+    var rev = new u16(32768);
+    for (var i = 0; i < 32768; ++i) {
+        // reverse table algorithm from SO
+        var x = ((i & 0xAAAA) >> 1) | ((i & 0x5555) << 1);
+        x = ((x & 0xCCCC) >> 2) | ((x & 0x3333) << 2);
+        x = ((x & 0xF0F0) >> 4) | ((x & 0x0F0F) << 4);
+        rev[i] = (((x & 0xFF00) >> 8) | ((x & 0x00FF) << 8)) >> 1;
+    }
+    // create huffman tree from u8 "map": index -> code length for code index
+    // mb (max bits) must be at most 15
+    // TODO: optimize/split up?
+    var hMap = (function (cd, mb, r) {
+        var s = cd.length;
+        // index
+        var i = 0;
+        // u16 "map": index -> # of codes with bit length = index
+        var l = new u16(mb);
+        // length of cd must be 288 (total # of codes)
+        for (; i < s; ++i) {
+            if (cd[i])
+                ++l[cd[i] - 1];
+        }
+        // u16 "map": index -> minimum code for bit length = index
+        var le = new u16(mb);
+        for (i = 1; i < mb; ++i) {
+            le[i] = (le[i - 1] + l[i - 1]) << 1;
+        }
+        var co;
+        if (r) {
+            // u16 "map": index -> number of actual bits, symbol for code
+            co = new u16(1 << mb);
+            // bits to remove for reverser
+            var rvb = 15 - mb;
+            for (i = 0; i < s; ++i) {
+                // ignore 0 lengths
+                if (cd[i]) {
+                    // num encoding both symbol and bits read
+                    var sv = (i << 4) | cd[i];
+                    // free bits
+                    var r_1 = mb - cd[i];
+                    // start value
+                    var v = le[cd[i] - 1]++ << r_1;
+                    // m is end value
+                    for (var m = v | ((1 << r_1) - 1); v <= m; ++v) {
+                        // every 16 bit value starting with the code yields the same result
+                        co[rev[v] >> rvb] = sv;
+                    }
+                }
+            }
+        }
+        else {
+            co = new u16(s);
+            for (i = 0; i < s; ++i) {
+                if (cd[i]) {
+                    co[i] = rev[le[cd[i] - 1]++] >> (15 - cd[i]);
+                }
+            }
+        }
+        return co;
+    });
+    // fixed length tree
+    var flt = new u8(288);
+    for (var i = 0; i < 144; ++i)
+        flt[i] = 8;
+    for (var i = 144; i < 256; ++i)
+        flt[i] = 9;
+    for (var i = 256; i < 280; ++i)
+        flt[i] = 7;
+    for (var i = 280; i < 288; ++i)
+        flt[i] = 8;
+    // fixed distance tree
+    var fdt = new u8(32);
+    for (var i = 0; i < 32; ++i)
+        fdt[i] = 5;
+    // fixed length map
+    var flm = /*#__PURE__*/ hMap(flt, 9, 0), flrm = /*#__PURE__*/ hMap(flt, 9, 1);
+    // fixed distance map
+    var fdm = /*#__PURE__*/ hMap(fdt, 5, 0), fdrm = /*#__PURE__*/ hMap(fdt, 5, 1);
+    // find max of array
+    var max = function (a) {
+        var m = a[0];
+        for (var i = 1; i < a.length; ++i) {
+            if (a[i] > m)
+                m = a[i];
+        }
+        return m;
+    };
+    // read d, starting at bit p and mask with m
+    var bits = function (d, p, m) {
+        var o = (p / 8) | 0;
+        return ((d[o] | (d[o + 1] << 8)) >> (p & 7)) & m;
+    };
+    // read d, starting at bit p continuing for at least 16 bits
+    var bits16 = function (d, p) {
+        var o = (p / 8) | 0;
+        return ((d[o] | (d[o + 1] << 8) | (d[o + 2] << 16)) >> (p & 7));
+    };
+    // get end of byte
+    var shft = function (p) { return ((p + 7) / 8) | 0; };
+    // typed array slice - allows garbage collector to free original reference,
+    // while being more compatible than .slice
+    var slc = function (v, s, e) {
+        if (s == null || s < 0)
+            s = 0;
+        if (e == null || e > v.length)
+            e = v.length;
+        // can't use .constructor in case user-supplied
+        return new u8(v.subarray(s, e));
+    };
+    // error codes
+    var ec = [
+        'unexpected EOF',
+        'invalid block type',
+        'invalid length/literal',
+        'invalid distance',
+        'stream finished',
+        'no stream handler',
+        ,
+        'no callback',
+        'invalid UTF-8 data',
+        'extra field too long',
+        'date not in range 1980-2099',
+        'filename too long',
+        'stream finishing',
+        'invalid zip data'
+        // determined by unknown compression method
+    ];
+    var err = function (ind, msg, nt) {
+        var e = new Error(msg || ec[ind]);
+        e.code = ind;
+        if (Error.captureStackTrace)
+            Error.captureStackTrace(e, err);
+        if (!nt)
+            throw e;
+        return e;
+    };
+    // expands raw DEFLATE data
+    var inflt = function (dat, st, buf, dict) {
+        // source length       dict length
+        var sl = dat.length, dl = dict ? dict.length : 0;
+        if (!sl || st.f && !st.l)
+            return buf || new u8(0);
+        var noBuf = !buf;
+        // have to estimate size
+        var resize = noBuf || st.i != 2;
+        // no state
+        var noSt = st.i;
+        // Assumes roughly 33% compression ratio average
+        if (noBuf)
+            buf = new u8(sl * 3);
+        // ensure buffer can fit at least l elements
+        var cbuf = function (l) {
+            var bl = buf.length;
+            // need to increase size to fit
+            if (l > bl) {
+                // Double or set to necessary, whichever is greater
+                var nbuf = new u8(Math.max(bl * 2, l));
+                nbuf.set(buf);
+                buf = nbuf;
+            }
+        };
+        //  last chunk         bitpos           bytes
+        var final = st.f || 0, pos = st.p || 0, bt = st.b || 0, lm = st.l, dm = st.d, lbt = st.m, dbt = st.n;
+        // total bits
+        var tbts = sl * 8;
+        do {
+            if (!lm) {
+                // BFINAL - this is only 1 when last chunk is next
+                final = bits(dat, pos, 1);
+                // type: 0 = no compression, 1 = fixed huffman, 2 = dynamic huffman
+                var type = bits(dat, pos + 1, 3);
+                pos += 3;
+                if (!type) {
+                    // go to end of byte boundary
+                    var s = shft(pos) + 4, l = dat[s - 4] | (dat[s - 3] << 8), t = s + l;
+                    if (t > sl) {
+                        if (noSt)
+                            err(0);
+                        break;
+                    }
+                    // ensure size
+                    if (resize)
+                        cbuf(bt + l);
+                    // Copy over uncompressed data
+                    buf.set(dat.subarray(s, t), bt);
+                    // Get new bitpos, update byte count
+                    st.b = bt += l, st.p = pos = t * 8, st.f = final;
+                    continue;
+                }
+                else if (type == 1)
+                    lm = flrm, dm = fdrm, lbt = 9, dbt = 5;
+                else if (type == 2) {
+                    //  literal                            lengths
+                    var hLit = bits(dat, pos, 31) + 257, hcLen = bits(dat, pos + 10, 15) + 4;
+                    var tl = hLit + bits(dat, pos + 5, 31) + 1;
+                    pos += 14;
+                    // length+distance tree
+                    var ldt = new u8(tl);
+                    // code length tree
+                    var clt = new u8(19);
+                    for (var i = 0; i < hcLen; ++i) {
+                        // use index map to get real code
+                        clt[clim[i]] = bits(dat, pos + i * 3, 7);
+                    }
+                    pos += hcLen * 3;
+                    // code lengths bits
+                    var clb = max(clt), clbmsk = (1 << clb) - 1;
+                    // code lengths map
+                    var clm = hMap(clt, clb, 1);
+                    for (var i = 0; i < tl;) {
+                        var r = clm[bits(dat, pos, clbmsk)];
+                        // bits read
+                        pos += r & 15;
+                        // symbol
+                        var s = r >> 4;
+                        // code length to copy
+                        if (s < 16) {
+                            ldt[i++] = s;
+                        }
+                        else {
+                            //  copy   count
+                            var c = 0, n = 0;
+                            if (s == 16)
+                                n = 3 + bits(dat, pos, 3), pos += 2, c = ldt[i - 1];
+                            else if (s == 17)
+                                n = 3 + bits(dat, pos, 7), pos += 3;
+                            else if (s == 18)
+                                n = 11 + bits(dat, pos, 127), pos += 7;
+                            while (n--)
+                                ldt[i++] = c;
+                        }
+                    }
+                    //    length tree                 distance tree
+                    var lt = ldt.subarray(0, hLit), dt = ldt.subarray(hLit);
+                    // max length bits
+                    lbt = max(lt);
+                    // max dist bits
+                    dbt = max(dt);
+                    lm = hMap(lt, lbt, 1);
+                    dm = hMap(dt, dbt, 1);
+                }
+                else
+                    err(1);
+                if (pos > tbts) {
+                    if (noSt)
+                        err(0);
+                    break;
+                }
+            }
+            // Make sure the buffer can hold this + the largest possible addition
+            // Maximum chunk size (practically, theoretically infinite) is 2^17
+            if (resize)
+                cbuf(bt + 131072);
+            var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
+            var lpos = pos;
+            for (;; lpos = pos) {
+                // bits read, code
+                var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
+                pos += c & 15;
+                if (pos > tbts) {
+                    if (noSt)
+                        err(0);
+                    break;
+                }
+                if (!c)
+                    err(2);
+                if (sym < 256)
+                    buf[bt++] = sym;
+                else if (sym == 256) {
+                    lpos = pos, lm = null;
+                    break;
+                }
+                else {
+                    var add = sym - 254;
+                    // no extra bits needed if less
+                    if (sym > 264) {
+                        // index
+                        var i = sym - 257, b = fleb[i];
+                        add = bits(dat, pos, (1 << b) - 1) + fl[i];
+                        pos += b;
+                    }
+                    // dist
+                    var d = dm[bits16(dat, pos) & dms], dsym = d >> 4;
+                    if (!d)
+                        err(3);
+                    pos += d & 15;
+                    var dt = fd[dsym];
+                    if (dsym > 3) {
+                        var b = fdeb[dsym];
+                        dt += bits16(dat, pos) & (1 << b) - 1, pos += b;
+                    }
+                    if (pos > tbts) {
+                        if (noSt)
+                            err(0);
+                        break;
+                    }
+                    if (resize)
+                        cbuf(bt + 131072);
+                    var end = bt + add;
+                    if (bt < dt) {
+                        var shift = dl - dt, dend = Math.min(dt, end);
+                        if (shift + bt < 0)
+                            err(3);
+                        for (; bt < dend; ++bt)
+                            buf[bt] = dict[shift + bt];
+                    }
+                    for (; bt < end; ++bt)
+                        buf[bt] = buf[bt - dt];
+                }
+            }
+            st.l = lm, st.p = lpos, st.b = bt, st.f = final;
+            if (lm)
+                final = 1, st.m = lbt, st.d = dm, st.n = dbt;
+        } while (!final);
+        // don't reallocate for streams or user buffers
+        return bt != buf.length && noBuf ? slc(buf, 0, bt) : buf.subarray(0, bt);
+    };
+    // starting at p, write the minimum number of bits that can hold v to d
+    var wbits = function (d, p, v) {
+        v <<= p & 7;
+        var o = (p / 8) | 0;
+        d[o] |= v;
+        d[o + 1] |= v >> 8;
+    };
+    // starting at p, write the minimum number of bits (>8) that can hold v to d
+    var wbits16 = function (d, p, v) {
+        v <<= p & 7;
+        var o = (p / 8) | 0;
+        d[o] |= v;
+        d[o + 1] |= v >> 8;
+        d[o + 2] |= v >> 16;
+    };
+    // creates code lengths from a frequency table
+    var hTree = function (d, mb) {
+        // Need extra info to make a tree
+        var t = [];
+        for (var i = 0; i < d.length; ++i) {
+            if (d[i])
+                t.push({ s: i, f: d[i] });
+        }
+        var s = t.length;
+        var t2 = t.slice();
+        if (!s)
+            return { t: et, l: 0 };
+        if (s == 1) {
+            var v = new u8(t[0].s + 1);
+            v[t[0].s] = 1;
+            return { t: v, l: 1 };
+        }
+        t.sort(function (a, b) { return a.f - b.f; });
+        // after i2 reaches last ind, will be stopped
+        // freq must be greater than largest possible number of symbols
+        t.push({ s: -1, f: 25001 });
+        var l = t[0], r = t[1], i0 = 0, i1 = 1, i2 = 2;
+        t[0] = { s: -1, f: l.f + r.f, l: l, r: r };
+        // efficient algorithm from UZIP.js
+        // i0 is lookbehind, i2 is lookahead - after processing two low-freq
+        // symbols that combined have high freq, will start processing i2 (high-freq,
+        // non-composite) symbols instead
+        // see https://reddit.com/r/photopea/comments/ikekht/uzipjs_questions/
+        while (i1 != s - 1) {
+            l = t[t[i0].f < t[i2].f ? i0++ : i2++];
+            r = t[i0 != i1 && t[i0].f < t[i2].f ? i0++ : i2++];
+            t[i1++] = { s: -1, f: l.f + r.f, l: l, r: r };
+        }
+        var maxSym = t2[0].s;
+        for (var i = 1; i < s; ++i) {
+            if (t2[i].s > maxSym)
+                maxSym = t2[i].s;
+        }
+        // code lengths
+        var tr = new u16(maxSym + 1);
+        // max bits in tree
+        var mbt = ln(t[i1 - 1], tr, 0);
+        if (mbt > mb) {
+            // more algorithms from UZIP.js
+            // TODO: find out how this code works (debt)
+            //  ind    debt
+            var i = 0, dt = 0;
+            //    left            cost
+            var lft = mbt - mb, cst = 1 << lft;
+            t2.sort(function (a, b) { return tr[b.s] - tr[a.s] || a.f - b.f; });
+            for (; i < s; ++i) {
+                var i2_1 = t2[i].s;
+                if (tr[i2_1] > mb) {
+                    dt += cst - (1 << (mbt - tr[i2_1]));
+                    tr[i2_1] = mb;
+                }
+                else
+                    break;
+            }
+            dt >>= lft;
+            while (dt > 0) {
+                var i2_2 = t2[i].s;
+                if (tr[i2_2] < mb)
+                    dt -= 1 << (mb - tr[i2_2]++ - 1);
+                else
+                    ++i;
+            }
+            for (; i >= 0 && dt; --i) {
+                var i2_3 = t2[i].s;
+                if (tr[i2_3] == mb) {
+                    --tr[i2_3];
+                    ++dt;
+                }
+            }
+            mbt = mb;
+        }
+        return { t: new u8(tr), l: mbt };
+    };
+    // get the max length and assign length codes
+    var ln = function (n, l, d) {
+        return n.s == -1
+            ? Math.max(ln(n.l, l, d + 1), ln(n.r, l, d + 1))
+            : (l[n.s] = d);
+    };
+    // length codes generation
+    var lc = function (c) {
+        var s = c.length;
+        // Note that the semicolon was intentional
+        while (s && !c[--s])
+            ;
+        var cl = new u16(++s);
+        //  ind      num         streak
+        var cli = 0, cln = c[0], cls = 1;
+        var w = function (v) { cl[cli++] = v; };
+        for (var i = 1; i <= s; ++i) {
+            if (c[i] == cln && i != s)
+                ++cls;
+            else {
+                if (!cln && cls > 2) {
+                    for (; cls > 138; cls -= 138)
+                        w(32754);
+                    if (cls > 2) {
+                        w(cls > 10 ? ((cls - 11) << 5) | 28690 : ((cls - 3) << 5) | 12305);
+                        cls = 0;
+                    }
+                }
+                else if (cls > 3) {
+                    w(cln), --cls;
+                    for (; cls > 6; cls -= 6)
+                        w(8304);
+                    if (cls > 2)
+                        w(((cls - 3) << 5) | 8208), cls = 0;
+                }
+                while (cls--)
+                    w(cln);
+                cls = 1;
+                cln = c[i];
+            }
+        }
+        return { c: cl.subarray(0, cli), n: s };
+    };
+    // calculate the length of output from tree, code lengths
+    var clen = function (cf, cl) {
+        var l = 0;
+        for (var i = 0; i < cl.length; ++i)
+            l += cf[i] * cl[i];
+        return l;
+    };
+    // writes a fixed block
+    // returns the new bit pos
+    var wfblk = function (out, pos, dat) {
+        // no need to write 00 as type: TypedArray defaults to 0
+        var s = dat.length;
+        var o = shft(pos + 2);
+        out[o] = s & 255;
+        out[o + 1] = s >> 8;
+        out[o + 2] = out[o] ^ 255;
+        out[o + 3] = out[o + 1] ^ 255;
+        for (var i = 0; i < s; ++i)
+            out[o + i + 4] = dat[i];
+        return (o + 4 + s) * 8;
+    };
+    // writes a block
+    var wblk = function (dat, out, final, syms, lf, df, eb, li, bs, bl, p) {
+        wbits(out, p++, final);
+        ++lf[256];
+        var _a = hTree(lf, 15), dlt = _a.t, mlb = _a.l;
+        var _b = hTree(df, 15), ddt = _b.t, mdb = _b.l;
+        var _c = lc(dlt), lclt = _c.c, nlc = _c.n;
+        var _d = lc(ddt), lcdt = _d.c, ndc = _d.n;
+        var lcfreq = new u16(19);
+        for (var i = 0; i < lclt.length; ++i)
+            ++lcfreq[lclt[i] & 31];
+        for (var i = 0; i < lcdt.length; ++i)
+            ++lcfreq[lcdt[i] & 31];
+        var _e = hTree(lcfreq, 7), lct = _e.t, mlcb = _e.l;
+        var nlcc = 19;
+        for (; nlcc > 4 && !lct[clim[nlcc - 1]]; --nlcc)
+            ;
+        var flen = (bl + 5) << 3;
+        var ftlen = clen(lf, flt) + clen(df, fdt) + eb;
+        var dtlen = clen(lf, dlt) + clen(df, ddt) + eb + 14 + 3 * nlcc + clen(lcfreq, lct) + 2 * lcfreq[16] + 3 * lcfreq[17] + 7 * lcfreq[18];
+        if (bs >= 0 && flen <= ftlen && flen <= dtlen)
+            return wfblk(out, p, dat.subarray(bs, bs + bl));
+        var lm, ll, dm, dl;
+        wbits(out, p, 1 + (dtlen < ftlen)), p += 2;
+        if (dtlen < ftlen) {
+            lm = hMap(dlt, mlb, 0), ll = dlt, dm = hMap(ddt, mdb, 0), dl = ddt;
+            var llm = hMap(lct, mlcb, 0);
+            wbits(out, p, nlc - 257);
+            wbits(out, p + 5, ndc - 1);
+            wbits(out, p + 10, nlcc - 4);
+            p += 14;
+            for (var i = 0; i < nlcc; ++i)
+                wbits(out, p + 3 * i, lct[clim[i]]);
+            p += 3 * nlcc;
+            var lcts = [lclt, lcdt];
+            for (var it = 0; it < 2; ++it) {
+                var clct = lcts[it];
+                for (var i = 0; i < clct.length; ++i) {
+                    var len = clct[i] & 31;
+                    wbits(out, p, llm[len]), p += lct[len];
+                    if (len > 15)
+                        wbits(out, p, (clct[i] >> 5) & 127), p += clct[i] >> 12;
+                }
+            }
+        }
+        else {
+            lm = flm, ll = flt, dm = fdm, dl = fdt;
+        }
+        for (var i = 0; i < li; ++i) {
+            var sym = syms[i];
+            if (sym > 255) {
+                var len = (sym >> 18) & 31;
+                wbits16(out, p, lm[len + 257]), p += ll[len + 257];
+                if (len > 7)
+                    wbits(out, p, (sym >> 23) & 31), p += fleb[len];
+                var dst = sym & 31;
+                wbits16(out, p, dm[dst]), p += dl[dst];
+                if (dst > 3)
+                    wbits16(out, p, (sym >> 5) & 8191), p += fdeb[dst];
+            }
+            else {
+                wbits16(out, p, lm[sym]), p += ll[sym];
+            }
+        }
+        wbits16(out, p, lm[256]);
+        return p + ll[256];
+    };
+    // deflate options (nice << 13) | chain
+    var deo = /*#__PURE__*/ new i32([65540, 131080, 131088, 131104, 262176, 1048704, 1048832, 2114560, 2117632]);
+    // empty
+    var et = /*#__PURE__*/ new u8(0);
+    // compresses data into a raw DEFLATE buffer
+    var dflt = function (dat, lvl, plvl, pre, post, st) {
+        var s = st.z || dat.length;
+        var o = new u8(pre + s + 5 * (1 + Math.ceil(s / 7000)) + post);
+        // writing to this writes to the output buffer
+        var w = o.subarray(pre, o.length - post);
+        var lst = st.l;
+        var pos = (st.r || 0) & 7;
+        if (lvl) {
+            if (pos)
+                w[0] = st.r >> 3;
+            var opt = deo[lvl - 1];
+            var n = opt >> 13, c = opt & 8191;
+            var msk_1 = (1 << plvl) - 1;
+            //    prev 2-byte val map    curr 2-byte val map
+            var prev = st.p || new u16(32768), head = st.h || new u16(msk_1 + 1);
+            var bs1_1 = Math.ceil(plvl / 3), bs2_1 = 2 * bs1_1;
+            var hsh = function (i) { return (dat[i] ^ (dat[i + 1] << bs1_1) ^ (dat[i + 2] << bs2_1)) & msk_1; };
+            // 24576 is an arbitrary number of maximum symbols per block
+            // 424 buffer for last block
+            var syms = new i32(25000);
+            // length/literal freq   distance freq
+            var lf = new u16(288), df = new u16(32);
+            //  l/lcnt  exbits  index          l/lind  waitdx          blkpos
+            var lc_1 = 0, eb = 0, i = st.i || 0, li = 0, wi = st.w || 0, bs = 0;
+            for (; i + 2 < s; ++i) {
+                // hash value
+                var hv = hsh(i);
+                // index mod 32768    previous index mod
+                var imod = i & 32767, pimod = head[hv];
+                prev[imod] = pimod;
+                head[hv] = imod;
+                // We always should modify head and prev, but only add symbols if
+                // this data is not yet processed ("wait" for wait index)
+                if (wi <= i) {
+                    // bytes remaining
+                    var rem = s - i;
+                    if ((lc_1 > 7000 || li > 24576) && (rem > 423 || !lst)) {
+                        pos = wblk(dat, w, 0, syms, lf, df, eb, li, bs, i - bs, pos);
+                        li = lc_1 = eb = 0, bs = i;
+                        for (var j = 0; j < 286; ++j)
+                            lf[j] = 0;
+                        for (var j = 0; j < 30; ++j)
+                            df[j] = 0;
+                    }
+                    //  len    dist   chain
+                    var l = 2, d = 0, ch_1 = c, dif = imod - pimod & 32767;
+                    if (rem > 2 && hv == hsh(i - dif)) {
+                        var maxn = Math.min(n, rem) - 1;
+                        var maxd = Math.min(32767, i);
+                        // max possible length
+                        // not capped at dif because decompressors implement "rolling" index population
+                        var ml = Math.min(258, rem);
+                        while (dif <= maxd && --ch_1 && imod != pimod) {
+                            if (dat[i + l] == dat[i + l - dif]) {
+                                var nl = 0;
+                                for (; nl < ml && dat[i + nl] == dat[i + nl - dif]; ++nl)
+                                    ;
+                                if (nl > l) {
+                                    l = nl, d = dif;
+                                    // break out early when we reach "nice" (we are satisfied enough)
+                                    if (nl > maxn)
+                                        break;
+                                    // now, find the rarest 2-byte sequence within this
+                                    // length of literals and search for that instead.
+                                    // Much faster than just using the start
+                                    var mmd = Math.min(dif, nl - 2);
+                                    var md = 0;
+                                    for (var j = 0; j < mmd; ++j) {
+                                        var ti = i - dif + j & 32767;
+                                        var pti = prev[ti];
+                                        var cd = ti - pti & 32767;
+                                        if (cd > md)
+                                            md = cd, pimod = ti;
+                                    }
+                                }
+                            }
+                            // check the previous match
+                            imod = pimod, pimod = prev[imod];
+                            dif += imod - pimod & 32767;
+                        }
+                    }
+                    // d will be nonzero only when a match was found
+                    if (d) {
+                        // store both dist and len data in one int32
+                        // Make sure this is recognized as a len/dist with 28th bit (2^28)
+                        syms[li++] = 268435456 | (revfl[l] << 18) | revfd[d];
+                        var lin = revfl[l] & 31, din = revfd[d] & 31;
+                        eb += fleb[lin] + fdeb[din];
+                        ++lf[257 + lin];
+                        ++df[din];
+                        wi = i + l;
+                        ++lc_1;
+                    }
+                    else {
+                        syms[li++] = dat[i];
+                        ++lf[dat[i]];
+                    }
+                }
+            }
+            for (i = Math.max(i, wi); i < s; ++i) {
+                syms[li++] = dat[i];
+                ++lf[dat[i]];
+            }
+            pos = wblk(dat, w, lst, syms, lf, df, eb, li, bs, i - bs, pos);
+            if (!lst) {
+                st.r = (pos & 7) | w[(pos / 8) | 0] << 3;
+                // shft(pos) now 1 less if pos & 7 != 0
+                pos -= 7;
+                st.h = head, st.p = prev, st.i = i, st.w = wi;
+            }
+        }
+        else {
+            for (var i = st.w || 0; i < s + lst; i += 65535) {
+                // end
+                var e = i + 65535;
+                if (e >= s) {
+                    // write final block
+                    w[(pos / 8) | 0] = lst;
+                    e = s;
+                }
+                pos = wfblk(w, pos + 1, dat.subarray(i, e));
+            }
+            st.i = s;
+        }
+        return slc(o, 0, pre + shft(pos) + post);
+    };
+    // CRC32 table
+    var crct = /*#__PURE__*/ (function () {
+        var t = new Int32Array(256);
+        for (var i = 0; i < 256; ++i) {
+            var c = i, k = 9;
+            while (--k)
+                c = ((c & 1) && -306674912) ^ (c >>> 1);
+            t[i] = c;
+        }
+        return t;
+    })();
+    // CRC32
+    var crc = function () {
+        var c = -1;
+        return {
+            p: function (d) {
+                // closures have awful performance
+                var cr = c;
+                for (var i = 0; i < d.length; ++i)
+                    cr = crct[(cr & 255) ^ d[i]] ^ (cr >>> 8);
+                c = cr;
+            },
+            d: function () { return ~c; }
+        };
+    };
+    // deflate with opts
+    var dopt = function (dat, opt, pre, post, st) {
+        if (!st) {
+            st = { l: 1 };
+            if (opt.dictionary) {
+                var dict = opt.dictionary.subarray(-32768);
+                var newDat = new u8(dict.length + dat.length);
+                newDat.set(dict);
+                newDat.set(dat, dict.length);
+                dat = newDat;
+                st.w = dict.length;
+            }
+        }
+        return dflt(dat, opt.level == null ? 6 : opt.level, opt.mem == null ? (st.l ? Math.ceil(Math.max(8, Math.min(13, Math.log(dat.length))) * 1.5) : 20) : (12 + opt.mem), pre, post, st);
+    };
+    // Walmart object spread
+    var mrg = function (a, b) {
+        var o = {};
+        for (var k in a)
+            o[k] = a[k];
+        for (var k in b)
+            o[k] = b[k];
+        return o;
+    };
+    // read 2 bytes
+    var b2 = function (d, b) { return d[b] | (d[b + 1] << 8); };
+    // read 4 bytes
+    var b4 = function (d, b) { return (d[b] | (d[b + 1] << 8) | (d[b + 2] << 16) | (d[b + 3] << 24)) >>> 0; };
+    var b8 = function (d, b) { return b4(d, b) + (b4(d, b + 4) * 4294967296); };
+    // write bytes
+    var wbytes = function (d, b, v) {
+        for (; v; ++b)
+            d[b] = v, v >>>= 8;
+    };
+    /**
+     * Compresses data with DEFLATE without any wrapper
+     * @param data The data to compress
+     * @param opts The compression options
+     * @returns The deflated version of the data
+     */
+    function deflateSync(data, opts) {
+        return dopt(data, opts || {}, 0, 0);
+    }
+    /**
+     * Expands DEFLATE data with no wrapper
+     * @param data The data to decompress
+     * @param opts The decompression options
+     * @returns The decompressed version of the data
+     */
+    function inflateSync(data, opts) {
+        return inflt(data, { i: 2 }, opts && opts.out, opts && opts.dictionary);
+    }
+    // flatten a directory structure
+    var fltn = function (d, p, t, o) {
+        for (var k in d) {
+            var val = d[k], n = p + k, op = o;
+            if (Array.isArray(val))
+                op = mrg(o, val[1]), val = val[0];
+            if (val instanceof u8)
+                t[n] = [val, op];
+            else {
+                t[n += '/'] = [new u8(0), op];
+                fltn(val, n, t, o);
+            }
+        }
+    };
+    // text encoder
+    var te = typeof TextEncoder != 'undefined' && /*#__PURE__*/ new TextEncoder();
+    // text decoder
+    var td = typeof TextDecoder != 'undefined' && /*#__PURE__*/ new TextDecoder();
+    // text decoder stream
+    var tds = 0;
+    try {
+        td.decode(et, { stream: true });
+        tds = 1;
+    }
+    catch (e) { }
+    // decode UTF8
+    var dutf8 = function (d) {
+        for (var r = '', i = 0;;) {
+            var c = d[i++];
+            var eb = (c > 127) + (c > 223) + (c > 239);
+            if (i + eb > d.length)
+                return { s: r, r: slc(d, i - 1) };
+            if (!eb)
+                r += String.fromCharCode(c);
+            else if (eb == 3) {
+                c = ((c & 15) << 18 | (d[i++] & 63) << 12 | (d[i++] & 63) << 6 | (d[i++] & 63)) - 65536,
+                    r += String.fromCharCode(55296 | (c >> 10), 56320 | (c & 1023));
+            }
+            else if (eb & 1)
+                r += String.fromCharCode((c & 31) << 6 | (d[i++] & 63));
+            else
+                r += String.fromCharCode((c & 15) << 12 | (d[i++] & 63) << 6 | (d[i++] & 63));
+        }
+    };
+    /**
+     * Converts a string into a Uint8Array for use with compression/decompression methods
+     * @param str The string to encode
+     * @param latin1 Whether or not to interpret the data as Latin-1. This should
+     *               not need to be true unless decoding a binary string.
+     * @returns The string encoded in UTF-8/Latin-1 binary
+     */
+    function strToU8(str, latin1) {
+        var i; 
+        if (te)
+            return te.encode(str);
+        var l = str.length;
+        var ar = new u8(str.length + (str.length >> 1));
+        var ai = 0;
+        var w = function (v) { ar[ai++] = v; };
+        for (var i = 0; i < l; ++i) {
+            if (ai + 5 > ar.length) {
+                var n = new u8(ai + 8 + ((l - i) << 1));
+                n.set(ar);
+                ar = n;
+            }
+            var c = str.charCodeAt(i);
+            if (c < 128 || latin1)
+                w(c);
+            else if (c < 2048)
+                w(192 | (c >> 6)), w(128 | (c & 63));
+            else if (c > 55295 && c < 57344)
+                c = 65536 + (c & 1023 << 10) | (str.charCodeAt(++i) & 1023),
+                    w(240 | (c >> 18)), w(128 | ((c >> 12) & 63)), w(128 | ((c >> 6) & 63)), w(128 | (c & 63));
+            else
+                w(224 | (c >> 12)), w(128 | ((c >> 6) & 63)), w(128 | (c & 63));
+        }
+        return slc(ar, 0, ai);
+    }
+    /**
+     * Converts a Uint8Array to a string
+     * @param dat The data to decode to string
+     * @param latin1 Whether or not to interpret the data as Latin-1. This should
+     *               not need to be true unless encoding to binary string.
+     * @returns The original UTF-8/Latin-1 string
+     */
+    function strFromU8(dat, latin1) {
+        if (latin1) {
+            var r = '';
+            for (var i = 0; i < dat.length; i += 16384)
+                r += String.fromCharCode.apply(null, dat.subarray(i, i + 16384));
+            return r;
+        }
+        else if (td) {
+            return td.decode(dat);
+        }
+        else {
+            var _a = dutf8(dat), s = _a.s, r = _a.r;
+            if (r.length)
+                err(8);
+            return s;
+        }
+    }
+    // skip local zip header
+    var slzh = function (d, b) { return b + 30 + b2(d, b + 26) + b2(d, b + 28); };
+    // read zip header
+    var zh = function (d, b, z) {
+        var fnl = b2(d, b + 28), fn = strFromU8(d.subarray(b + 46, b + 46 + fnl), !(b2(d, b + 8) & 2048)), es = b + 46 + fnl, bs = b4(d, b + 20);
+        var _a = z && bs == 4294967295 ? z64e(d, es) : [bs, b4(d, b + 24), b4(d, b + 42)], sc = _a[0], su = _a[1], off = _a[2];
+        return [b2(d, b + 10), sc, su, fn, es + b2(d, b + 30) + b2(d, b + 32), off];
+    };
+    // read zip64 extra field
+    var z64e = function (d, b) {
+        for (; b2(d, b) != 1; b += 4 + b2(d, b + 2))
+            ;
+        return [b8(d, b + 12), b8(d, b + 4), b8(d, b + 20)];
+    };
+    // extra field length
+    var exfl = function (ex) {
+        var le = 0;
+        if (ex) {
+            for (var k in ex) {
+                var l = ex[k].length;
+                if (l > 65535)
+                    err(9);
+                le += l + 4;
+            }
+        }
+        return le;
+    };
+    // write zip header
+    var wzh = function (d, b, f, fn, u, c, ce, co) {
+        var fl = fn.length, ex = f.extra, col = co && co.length;
+        var exl = exfl(ex);
+        wbytes(d, b, ce != null ? 0x2014B50 : 0x4034B50), b += 4;
+        if (ce != null)
+            d[b++] = 20, d[b++] = f.os;
+        d[b] = 20, b += 2; // spec compliance? what's that?
+        d[b++] = (f.flag << 1) | (c < 0 && 8), d[b++] = u && 8;
+        d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
+        var dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
+        if (y < 0 || y > 119)
+            err(10);
+        wbytes(d, b, (y << 25) | ((dt.getMonth() + 1) << 21) | (dt.getDate() << 16) | (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1)), b += 4;
+        if (c != -1) {
+            wbytes(d, b, f.crc);
+            wbytes(d, b + 4, c < 0 ? -c - 2 : c);
+            wbytes(d, b + 8, f.size);
+        }
+        wbytes(d, b + 12, fl);
+        wbytes(d, b + 14, exl), b += 16;
+        if (ce != null) {
+            wbytes(d, b, col);
+            wbytes(d, b + 6, f.attrs);
+            wbytes(d, b + 10, ce), b += 14;
+        }
+        d.set(fn, b);
+        b += fl;
+        if (exl) {
+            for (var k in ex) {
+                var exf = ex[k], l = exf.length;
+                wbytes(d, b, +k);
+                wbytes(d, b + 2, l);
+                d.set(exf, b + 4), b += 4 + l;
+            }
+        }
+        if (col)
+            d.set(co, b), b += col;
+        return b;
+    };
+    // write zip footer (end of central directory)
+    var wzf = function (o, b, c, d, e) {
+        wbytes(o, b, 0x6054B50); // skip disk
+        wbytes(o, b + 8, c);
+        wbytes(o, b + 10, c);
+        wbytes(o, b + 12, d);
+        wbytes(o, b + 16, e);
+    };
+    /**
+     * Synchronously creates a ZIP file. Prefer using `zip` for better performance
+     * with more than one file.
+     * @param data The directory structure for the ZIP archive
+     * @param opts The main options, merged with per-file options
+     * @returns The generated ZIP archive
+     */
+    function zipSync(data, opts) {
+        if (!opts)
+            opts = {};
+        var r = {};
+        var files = [];
+        fltn(data, '', r, opts);
+        var o = 0;
+        var tot = 0;
+        for (var fn in r) {
+            var _a = r[fn], file = _a[0], p = _a[1];
+            var compression = p.level == 0 ? 0 : 8;
+            var f = strToU8(fn), s = f.length;
+            var com = p.comment, m = com && strToU8(com), ms = m && m.length;
+            var exl = exfl(p.extra);
+            if (s > 65535)
+                err(11);
+            var d = compression ? deflateSync(file, p) : file, l = d.length;
+            var c = crc();
+            c.p(file);
+            files.push(mrg(p, {
+                size: file.length,
+                crc: c.d(),
+                c: d,
+                f: f,
+                m: m,
+                u: s != fn.length || (m && (com.length != ms)),
+                o: o,
+                compression: compression
+            }));
+            o += 30 + s + exl + l;
+            tot += 76 + 2 * (s + exl) + (ms || 0) + l;
+        }
+        var out = new u8(tot + 22), oe = o, cdl = tot - o;
+        for (var i = 0; i < files.length; ++i) {
+            var f = files[i];
+            wzh(out, f.o, f, f.f, f.u, f.c.length);
+            var badd = 30 + f.f.length + exfl(f.extra);
+            out.set(f.c, f.o + badd);
+            wzh(out, o, f, f.f, f.u, f.c.length, f.o, f.m), o += 16 + badd + (f.m ? f.m.length : 0);
+        }
+        wzf(out, o, files.length, cdl, oe);
+        return out;
+    }
+    /**
+     * Synchronously decompresses a ZIP archive. Prefer using `unzip` for better
+     * performance with more than one file.
+     * @param data The raw compressed ZIP file
+     * @param opts The ZIP extraction options
+     * @returns The decompressed files
+     */
+    function unzipSync(data, opts) {
+        var files = {};
+        var e = data.length - 22;
+        for (; b4(data, e) != 0x6054B50; --e) {
+            if (!e || data.length - e > 65558)
+                err(13);
+        }
+        var c = b2(data, e + 8);
+        if (!c)
+            return {};
+        var o = b4(data, e + 16);
+        var z = o == 4294967295 || c == 65535;
+        if (z) {
+            var ze = b4(data, e - 12);
+            z = b4(data, ze) == 0x6064B50;
+            if (z) {
+                c = b4(data, ze + 32);
+                o = b4(data, ze + 48);
+            }
+        }
+        for (var i = 0; i < c; ++i) {
+            var _a = zh(data, o, z), c_2 = _a[0], sc = _a[1], su = _a[2], fn = _a[3], no = _a[4], off = _a[5], b = slzh(data, off);
+            o = no;
+            {
+                if (!c_2)
+                    files[fn] = slc(data, b, b + sc);
+                else if (c_2 == 8)
+                    files[fn] = inflateSync(data.subarray(b, b + sc), { out: new u8(su) });
+                else
+                    err(14, 'unknown compression type ' + c_2);
+            }
+        }
+        return files;
+    }
+
     class OpenXmlPackage {
-        constructor(_zip, options) {
-            this._zip = _zip;
+        constructor(_files, options) {
+            this._files = _files;
             this.options = options;
             this.xmlParser = new XmlParser();
+            this.decoder = new TextDecoder();
+            this.encoder = new TextEncoder();
         }
         get(path) {
             const p = normalizePath(path);
-            return this._zip.files[p] ?? this._zip.files[p.replace(/\//g, '\\')];
+            return this._files[p] ?? this._files[p.replace(/\//g, "\\")] ?? null;
         }
         update(path, content) {
-            this._zip.file(path, content);
+            this._files[normalizePath(path)] = toUint8Array(content, this.encoder);
         }
         static async load(input, options) {
-            const zip = await JSZip.loadAsync(input);
-            return new OpenXmlPackage(zip, options);
+            const data = await inputToUint8Array(input);
+            return new OpenXmlPackage(normalizeFiles(unzipSync(data)), options);
+        }
+        static fromFiles(files, options) {
+            return new OpenXmlPackage(normalizeFiles(files), options);
         }
         save(type = "blob") {
-            return this._zip.generateAsync({ type });
+            const zipped = zipSync(this._files);
+            switch (type) {
+                case "uint8array":
+                    return Promise.resolve(zipped);
+                case "arraybuffer":
+                    return Promise.resolve(zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength));
+                case "blob":
+                default:
+                    return Promise.resolve(new Blob([new Uint8Array(zipped)]));
+            }
         }
         load(path, type = "string") {
-            return this.get(path)?.async(type) ?? Promise.resolve(null);
+            const file = this.get(path);
+            if (!file)
+                return Promise.resolve(null);
+            switch (type) {
+                case "uint8array":
+                    return Promise.resolve(file.slice());
+                case "arraybuffer":
+                    return Promise.resolve(file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength));
+                case "blob":
+                    return Promise.resolve(new Blob([new Uint8Array(file)]));
+                case "string":
+                default:
+                    return Promise.resolve(this.decoder.decode(file));
+            }
         }
         async loadRelationships(path = null) {
             let relsPath = `_rels/.rels`;
@@ -331,6 +1437,37 @@
     }
     function normalizePath(path) {
         return path.startsWith('/') ? path.substr(1) : path;
+    }
+    function normalizeFiles(files) {
+        const result = {};
+        for (const [path, file] of Object.entries(files ?? {})) {
+            result[normalizePath(path)] = file;
+        }
+        return result;
+    }
+    async function inputToUint8Array(input) {
+        if (input instanceof Uint8Array)
+            return input.slice();
+        if (input instanceof ArrayBuffer)
+            return new Uint8Array(input);
+        if (ArrayBuffer.isView(input))
+            return new Uint8Array(input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
+        if (input instanceof Blob)
+            return new Uint8Array(await input.arrayBuffer());
+        if (typeof input?.arrayBuffer === "function")
+            return new Uint8Array(await input.arrayBuffer());
+        throw new Error("Unsupported input type for OpenXmlPackage.load");
+    }
+    function toUint8Array(value, encoder) {
+        if (value instanceof Uint8Array)
+            return value;
+        if (value instanceof ArrayBuffer)
+            return new Uint8Array(value);
+        if (typeof value === "string")
+            return encoder.encode(value);
+        if (value instanceof Blob)
+            throw new Error("Blob updates are not supported for in-memory OpenXmlPackage");
+        return new Uint8Array(value);
     }
 
     class DocumentPart extends Part {
@@ -1093,6 +2230,61 @@
         }
     }
 
+    async function parseDocumentInWorker(data, options) {
+        const workerUrl = resolveWorkerUrl(options.workerUrl);
+        if (!workerUrl || typeof Worker === "undefined") {
+            return null;
+        }
+        const buffer = await toArrayBuffer(data);
+        return new Promise((resolve, reject) => {
+            const worker = new Worker(workerUrl);
+            worker.onmessage = event => {
+                const payload = event.data;
+                worker.terminate();
+                if (payload?.type === "parsed") {
+                    resolve(payload.payload);
+                }
+                else {
+                    reject(new Error(payload?.error ?? "Unknown parser worker error"));
+                }
+            };
+            worker.onerror = event => {
+                worker.terminate();
+                reject(event.error ?? new Error(event.message));
+            };
+            worker.postMessage({
+                type: "parse",
+                buffer,
+                options: JSON.parse(JSON.stringify(options))
+            }, [buffer]);
+        });
+    }
+    function resolveWorkerUrl(explicitUrl) {
+        if (explicitUrl)
+            return explicitUrl;
+        if (typeof document === "undefined")
+            return null;
+        const scripts = Array.from(document.scripts ?? []).reverse();
+        for (const script of scripts) {
+            const src = script.src;
+            if (!src)
+                continue;
+            if (/docx-preview(?:\.min)?\.js(?:\?.*)?$/i.test(src)) {
+                return src.replace(/docx-preview(?:\.min)?\.js(?:\?.*)?$/i, "docx-preview-worker.js");
+            }
+        }
+        return null;
+    }
+    async function toArrayBuffer(data) {
+        if (data instanceof ArrayBuffer)
+            return data;
+        if (data instanceof Uint8Array)
+            return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        if (data && typeof data.arrayBuffer === "function")
+            return await data.arrayBuffer();
+        throw new Error("Unsupported input type for parser worker");
+    }
+
     const topLevelRels = [
         { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
         { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
@@ -1108,6 +2300,21 @@
             var d = new WordDocument();
             d._options = options;
             d._parser = parser;
+            if (options.useWorkerParser) {
+                try {
+                    const parsed = await parseDocumentInWorker(blob, options);
+                    if (parsed) {
+                        d._package = OpenXmlPackage.fromFiles(fileEntriesToMap(parsed.files), options);
+                        d.applySerializedDocument(parsed);
+                        return d;
+                    }
+                }
+                catch (error) {
+                    if (options.debug) {
+                        console.warn("DOCX: Worker parser failed, falling back to main thread", error);
+                    }
+                }
+            }
             d._package = await OpenXmlPackage.load(blob, options);
             d.rels = await d._package.loadRelationships();
             await Promise.all(topLevelRels.map(rel => {
@@ -1115,6 +2322,24 @@
                 return d.loadRelationshipPart(r.target, r.type);
             }));
             return d;
+        }
+        applySerializedDocument(data) {
+            this.rels = data.rels;
+            this.parts = data.parts.map(part => ({ ...part }));
+            this.partsMap = keyBy(this.parts, x => x.path);
+            this.documentPart = data.rolePaths.documentPart ? this.partsMap[data.rolePaths.documentPart] : null;
+            this.fontTablePart = data.rolePaths.fontTablePart ? this.partsMap[data.rolePaths.fontTablePart] : null;
+            this.numberingPart = data.rolePaths.numberingPart ? this.partsMap[data.rolePaths.numberingPart] : null;
+            this.stylesPart = data.rolePaths.stylesPart ? this.partsMap[data.rolePaths.stylesPart] : null;
+            this.footnotesPart = data.rolePaths.footnotesPart ? this.partsMap[data.rolePaths.footnotesPart] : null;
+            this.endnotesPart = data.rolePaths.endnotesPart ? this.partsMap[data.rolePaths.endnotesPart] : null;
+            this.themePart = data.rolePaths.themePart ? this.partsMap[data.rolePaths.themePart] : null;
+            this.corePropsPart = data.rolePaths.corePropsPart ? this.partsMap[data.rolePaths.corePropsPart] : null;
+            this.extendedPropsPart = data.rolePaths.extendedPropsPart ? this.partsMap[data.rolePaths.extendedPropsPart] : null;
+            this.customPropsPart = data.rolePaths.customPropsPart ? this.partsMap[data.rolePaths.customPropsPart] : null;
+            this.settingsPart = data.rolePaths.settingsPart ? this.partsMap[data.rolePaths.settingsPart] : null;
+            this.commentsPart = data.rolePaths.commentsPart ? this.partsMap[data.rolePaths.commentsPart] : null;
+            this.commentsExtendedPart = data.rolePaths.commentsExtendedPart ? this.partsMap[data.rolePaths.commentsExtendedPart] : null;
         }
         save(type = "blob") {
             return this._package.save(type);
@@ -1220,6 +2445,13 @@
             const path = this.getPathById(part, id);
             return path ? this._package.load(path, outputType) : Promise.resolve(null);
         }
+    }
+    function fileEntriesToMap(files) {
+        const result = {};
+        for (const file of files) {
+            result[file.path] = new Uint8Array(file.buffer);
+        }
+        return result;
     }
     function deobfuscate(data, guidKey) {
         const len = 16;
@@ -2056,7 +3288,7 @@
             var isAnchor = node.localName == "anchor";
             let wrapType = null;
             let simplePos = globalXmlParser.boolAttr(node, "simplePos");
-            globalXmlParser.boolAttr(node, "behindDoc");
+            let behindDoc = globalXmlParser.boolAttr(node, "behindDoc");
             let docPrId = null;
             let posX = { relative: "page", align: "left", offset: "0" };
             let posY = { relative: "page", align: "top", offset: "0" };
@@ -2125,6 +3357,16 @@
             else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
                 result.cssStyle["float"] = posX.align;
             }
+            result.props = {
+                ...result.props,
+                drawingAnchor: {
+                    isAnchor,
+                    wrapType,
+                    behindDoc,
+                    posX: { ...posX },
+                    posY: { ...posY }
+                }
+            };
             return result;
         }
         parseGraphic(elem) {
@@ -2848,6 +4090,1006 @@
         return parseFloat(length);
     }
 
+    function memo(getDeps, fn, opts) {
+      let deps = opts.initialDeps ?? [];
+      let result;
+      let isInitial = true;
+      function memoizedFunction() {
+        var _a, _b, _c;
+        let depTime;
+        if (opts.key && ((_a = opts.debug) == null ? void 0 : _a.call(opts))) depTime = Date.now();
+        const newDeps = getDeps();
+        const depsChanged = newDeps.length !== deps.length || newDeps.some((dep, index) => deps[index] !== dep);
+        if (!depsChanged) {
+          return result;
+        }
+        deps = newDeps;
+        let resultTime;
+        if (opts.key && ((_b = opts.debug) == null ? void 0 : _b.call(opts))) resultTime = Date.now();
+        result = fn(...newDeps);
+        if (opts.key && ((_c = opts.debug) == null ? void 0 : _c.call(opts))) {
+          const depEndTime = Math.round((Date.now() - depTime) * 100) / 100;
+          const resultEndTime = Math.round((Date.now() - resultTime) * 100) / 100;
+          const resultFpsPercentage = resultEndTime / 16;
+          const pad = (str, num) => {
+            str = String(str);
+            while (str.length < num) {
+              str = " " + str;
+            }
+            return str;
+          };
+          console.info(
+            `%c⏱ ${pad(resultEndTime, 5)} /${pad(depEndTime, 5)} ms`,
+            `
+            font-size: .6rem;
+            font-weight: bold;
+            color: hsl(${Math.max(
+          0,
+          Math.min(120 - 120 * resultFpsPercentage, 120)
+        )}deg 100% 31%);`,
+            opts == null ? void 0 : opts.key
+          );
+        }
+        if ((opts == null ? void 0 : opts.onChange) && !(isInitial && opts.skipInitialOnChange)) {
+          opts.onChange(result);
+        }
+        isInitial = false;
+        return result;
+      }
+      memoizedFunction.updateDeps = (newDeps) => {
+        deps = newDeps;
+      };
+      return memoizedFunction;
+    }
+    function notUndefined(value, msg) {
+      if (value === void 0) {
+        throw new Error(`Unexpected undefined${""}`);
+      } else {
+        return value;
+      }
+    }
+    const approxEqual = (a, b) => Math.abs(a - b) < 1.01;
+    const debounce = (targetWindow, fn, ms) => {
+      let timeoutId;
+      return function(...args) {
+        targetWindow.clearTimeout(timeoutId);
+        timeoutId = targetWindow.setTimeout(() => fn.apply(this, args), ms);
+      };
+    };
+
+    const getRect = (element) => {
+      const { offsetWidth, offsetHeight } = element;
+      return { width: offsetWidth, height: offsetHeight };
+    };
+    const defaultKeyExtractor = (index) => index;
+    const defaultRangeExtractor = (range) => {
+      const start = Math.max(range.startIndex - range.overscan, 0);
+      const end = Math.min(range.endIndex + range.overscan, range.count - 1);
+      const arr = [];
+      for (let i = start; i <= end; i++) {
+        arr.push(i);
+      }
+      return arr;
+    };
+    const observeElementRect = (instance, cb) => {
+      const element = instance.scrollElement;
+      if (!element) {
+        return;
+      }
+      const targetWindow = instance.targetWindow;
+      if (!targetWindow) {
+        return;
+      }
+      const handler = (rect) => {
+        const { width, height } = rect;
+        cb({ width: Math.round(width), height: Math.round(height) });
+      };
+      handler(getRect(element));
+      if (!targetWindow.ResizeObserver) {
+        return () => {
+        };
+      }
+      const observer = new targetWindow.ResizeObserver((entries) => {
+        const run = () => {
+          const entry = entries[0];
+          if (entry == null ? void 0 : entry.borderBoxSize) {
+            const box = entry.borderBoxSize[0];
+            if (box) {
+              handler({ width: box.inlineSize, height: box.blockSize });
+              return;
+            }
+          }
+          handler(getRect(element));
+        };
+        instance.options.useAnimationFrameWithResizeObserver ? requestAnimationFrame(run) : run();
+      });
+      observer.observe(element, { box: "border-box" });
+      return () => {
+        observer.unobserve(element);
+      };
+    };
+    const addEventListenerOptions = {
+      passive: true
+    };
+    const supportsScrollend = typeof window == "undefined" ? true : "onscrollend" in window;
+    const observeElementOffset = (instance, cb) => {
+      const element = instance.scrollElement;
+      if (!element) {
+        return;
+      }
+      const targetWindow = instance.targetWindow;
+      if (!targetWindow) {
+        return;
+      }
+      let offset = 0;
+      const fallback = instance.options.useScrollendEvent && supportsScrollend ? () => void 0 : debounce(
+        targetWindow,
+        () => {
+          cb(offset, false);
+        },
+        instance.options.isScrollingResetDelay
+      );
+      const createHandler = (isScrolling) => () => {
+        const { horizontal, isRtl } = instance.options;
+        offset = horizontal ? element["scrollLeft"] * (isRtl && -1 || 1) : element["scrollTop"];
+        fallback();
+        cb(offset, isScrolling);
+      };
+      const handler = createHandler(true);
+      const endHandler = createHandler(false);
+      element.addEventListener("scroll", handler, addEventListenerOptions);
+      const registerScrollendEvent = instance.options.useScrollendEvent && supportsScrollend;
+      if (registerScrollendEvent) {
+        element.addEventListener("scrollend", endHandler, addEventListenerOptions);
+      }
+      return () => {
+        element.removeEventListener("scroll", handler);
+        if (registerScrollendEvent) {
+          element.removeEventListener("scrollend", endHandler);
+        }
+      };
+    };
+    const measureElement = (element, entry, instance) => {
+      if (entry == null ? void 0 : entry.borderBoxSize) {
+        const box = entry.borderBoxSize[0];
+        if (box) {
+          const size = Math.round(
+            box[instance.options.horizontal ? "inlineSize" : "blockSize"]
+          );
+          return size;
+        }
+      }
+      return element[instance.options.horizontal ? "offsetWidth" : "offsetHeight"];
+    };
+    const elementScroll = (offset, {
+      adjustments = 0,
+      behavior
+    }, instance) => {
+      var _a, _b;
+      const toOffset = offset + adjustments;
+      (_b = (_a = instance.scrollElement) == null ? void 0 : _a.scrollTo) == null ? void 0 : _b.call(_a, {
+        [instance.options.horizontal ? "left" : "top"]: toOffset,
+        behavior
+      });
+    };
+    class Virtualizer {
+      constructor(opts) {
+        this.unsubs = [];
+        this.scrollElement = null;
+        this.targetWindow = null;
+        this.isScrolling = false;
+        this.scrollState = null;
+        this.measurementsCache = [];
+        this.itemSizeCache = /* @__PURE__ */ new Map();
+        this.laneAssignments = /* @__PURE__ */ new Map();
+        this.pendingMeasuredCacheIndexes = [];
+        this.prevLanes = void 0;
+        this.lanesChangedFlag = false;
+        this.lanesSettling = false;
+        this.scrollRect = null;
+        this.scrollOffset = null;
+        this.scrollDirection = null;
+        this.scrollAdjustments = 0;
+        this.elementsCache = /* @__PURE__ */ new Map();
+        this.now = () => {
+          var _a, _b, _c;
+          return ((_c = (_b = (_a = this.targetWindow) == null ? void 0 : _a.performance) == null ? void 0 : _b.now) == null ? void 0 : _c.call(_b)) ?? Date.now();
+        };
+        this.observer = /* @__PURE__ */ (() => {
+          let _ro = null;
+          const get = () => {
+            if (_ro) {
+              return _ro;
+            }
+            if (!this.targetWindow || !this.targetWindow.ResizeObserver) {
+              return null;
+            }
+            return _ro = new this.targetWindow.ResizeObserver((entries) => {
+              entries.forEach((entry) => {
+                const run = () => {
+                  const node = entry.target;
+                  const index = this.indexFromElement(node);
+                  if (!node.isConnected) {
+                    this.observer.unobserve(node);
+                    return;
+                  }
+                  if (this.shouldMeasureDuringScroll(index)) {
+                    this.resizeItem(
+                      index,
+                      this.options.measureElement(node, entry, this)
+                    );
+                  }
+                };
+                this.options.useAnimationFrameWithResizeObserver ? requestAnimationFrame(run) : run();
+              });
+            });
+          };
+          return {
+            disconnect: () => {
+              var _a;
+              (_a = get()) == null ? void 0 : _a.disconnect();
+              _ro = null;
+            },
+            observe: (target) => {
+              var _a;
+              return (_a = get()) == null ? void 0 : _a.observe(target, { box: "border-box" });
+            },
+            unobserve: (target) => {
+              var _a;
+              return (_a = get()) == null ? void 0 : _a.unobserve(target);
+            }
+          };
+        })();
+        this.range = null;
+        this.setOptions = (opts2) => {
+          Object.entries(opts2).forEach(([key, value]) => {
+            if (typeof value === "undefined") delete opts2[key];
+          });
+          this.options = {
+            debug: false,
+            initialOffset: 0,
+            overscan: 1,
+            paddingStart: 0,
+            paddingEnd: 0,
+            scrollPaddingStart: 0,
+            scrollPaddingEnd: 0,
+            horizontal: false,
+            getItemKey: defaultKeyExtractor,
+            rangeExtractor: defaultRangeExtractor,
+            onChange: () => {
+            },
+            measureElement,
+            initialRect: { width: 0, height: 0 },
+            scrollMargin: 0,
+            gap: 0,
+            indexAttribute: "data-index",
+            initialMeasurementsCache: [],
+            lanes: 1,
+            isScrollingResetDelay: 150,
+            enabled: true,
+            isRtl: false,
+            useScrollendEvent: false,
+            useAnimationFrameWithResizeObserver: false,
+            ...opts2
+          };
+        };
+        this.notify = (sync) => {
+          var _a, _b;
+          (_b = (_a = this.options).onChange) == null ? void 0 : _b.call(_a, this, sync);
+        };
+        this.maybeNotify = memo(
+          () => {
+            this.calculateRange();
+            return [
+              this.isScrolling,
+              this.range ? this.range.startIndex : null,
+              this.range ? this.range.endIndex : null
+            ];
+          },
+          (isScrolling) => {
+            this.notify(isScrolling);
+          },
+          {
+            key: "production" !== "production",
+            debug: () => this.options.debug,
+            initialDeps: [
+              this.isScrolling,
+              this.range ? this.range.startIndex : null,
+              this.range ? this.range.endIndex : null
+            ]
+          }
+        );
+        this.cleanup = () => {
+          this.unsubs.filter(Boolean).forEach((d) => d());
+          this.unsubs = [];
+          this.observer.disconnect();
+          if (this.rafId != null && this.targetWindow) {
+            this.targetWindow.cancelAnimationFrame(this.rafId);
+            this.rafId = null;
+          }
+          this.scrollState = null;
+          this.scrollElement = null;
+          this.targetWindow = null;
+        };
+        this._didMount = () => {
+          return () => {
+            this.cleanup();
+          };
+        };
+        this._willUpdate = () => {
+          var _a;
+          const scrollElement = this.options.enabled ? this.options.getScrollElement() : null;
+          if (this.scrollElement !== scrollElement) {
+            this.cleanup();
+            if (!scrollElement) {
+              this.maybeNotify();
+              return;
+            }
+            this.scrollElement = scrollElement;
+            if (this.scrollElement && "ownerDocument" in this.scrollElement) {
+              this.targetWindow = this.scrollElement.ownerDocument.defaultView;
+            } else {
+              this.targetWindow = ((_a = this.scrollElement) == null ? void 0 : _a.window) ?? null;
+            }
+            this.elementsCache.forEach((cached) => {
+              this.observer.observe(cached);
+            });
+            this.unsubs.push(
+              this.options.observeElementRect(this, (rect) => {
+                this.scrollRect = rect;
+                this.maybeNotify();
+              })
+            );
+            this.unsubs.push(
+              this.options.observeElementOffset(this, (offset, isScrolling) => {
+                this.scrollAdjustments = 0;
+                this.scrollDirection = isScrolling ? this.getScrollOffset() < offset ? "forward" : "backward" : null;
+                this.scrollOffset = offset;
+                this.isScrolling = isScrolling;
+                if (this.scrollState) {
+                  this.scheduleScrollReconcile();
+                }
+                this.maybeNotify();
+              })
+            );
+            this._scrollToOffset(this.getScrollOffset(), {
+              adjustments: void 0,
+              behavior: void 0
+            });
+          }
+        };
+        this.rafId = null;
+        this.getSize = () => {
+          if (!this.options.enabled) {
+            this.scrollRect = null;
+            return 0;
+          }
+          this.scrollRect = this.scrollRect ?? this.options.initialRect;
+          return this.scrollRect[this.options.horizontal ? "width" : "height"];
+        };
+        this.getScrollOffset = () => {
+          if (!this.options.enabled) {
+            this.scrollOffset = null;
+            return 0;
+          }
+          this.scrollOffset = this.scrollOffset ?? (typeof this.options.initialOffset === "function" ? this.options.initialOffset() : this.options.initialOffset);
+          return this.scrollOffset;
+        };
+        this.getFurthestMeasurement = (measurements, index) => {
+          const furthestMeasurementsFound = /* @__PURE__ */ new Map();
+          const furthestMeasurements = /* @__PURE__ */ new Map();
+          for (let m = index - 1; m >= 0; m--) {
+            const measurement = measurements[m];
+            if (furthestMeasurementsFound.has(measurement.lane)) {
+              continue;
+            }
+            const previousFurthestMeasurement = furthestMeasurements.get(
+              measurement.lane
+            );
+            if (previousFurthestMeasurement == null || measurement.end > previousFurthestMeasurement.end) {
+              furthestMeasurements.set(measurement.lane, measurement);
+            } else if (measurement.end < previousFurthestMeasurement.end) {
+              furthestMeasurementsFound.set(measurement.lane, true);
+            }
+            if (furthestMeasurementsFound.size === this.options.lanes) {
+              break;
+            }
+          }
+          return furthestMeasurements.size === this.options.lanes ? Array.from(furthestMeasurements.values()).sort((a, b) => {
+            if (a.end === b.end) {
+              return a.index - b.index;
+            }
+            return a.end - b.end;
+          })[0] : void 0;
+        };
+        this.getMeasurementOptions = memo(
+          () => [
+            this.options.count,
+            this.options.paddingStart,
+            this.options.scrollMargin,
+            this.options.getItemKey,
+            this.options.enabled,
+            this.options.lanes
+          ],
+          (count, paddingStart, scrollMargin, getItemKey, enabled, lanes) => {
+            const lanesChanged = this.prevLanes !== void 0 && this.prevLanes !== lanes;
+            if (lanesChanged) {
+              this.lanesChangedFlag = true;
+            }
+            this.prevLanes = lanes;
+            this.pendingMeasuredCacheIndexes = [];
+            return {
+              count,
+              paddingStart,
+              scrollMargin,
+              getItemKey,
+              enabled,
+              lanes
+            };
+          },
+          {
+            key: false
+          }
+        );
+        this.getMeasurements = memo(
+          () => [this.getMeasurementOptions(), this.itemSizeCache],
+          ({ count, paddingStart, scrollMargin, getItemKey, enabled, lanes }, itemSizeCache) => {
+            if (!enabled) {
+              this.measurementsCache = [];
+              this.itemSizeCache.clear();
+              this.laneAssignments.clear();
+              return [];
+            }
+            if (this.laneAssignments.size > count) {
+              for (const index of this.laneAssignments.keys()) {
+                if (index >= count) {
+                  this.laneAssignments.delete(index);
+                }
+              }
+            }
+            if (this.lanesChangedFlag) {
+              this.lanesChangedFlag = false;
+              this.lanesSettling = true;
+              this.measurementsCache = [];
+              this.itemSizeCache.clear();
+              this.laneAssignments.clear();
+              this.pendingMeasuredCacheIndexes = [];
+            }
+            if (this.measurementsCache.length === 0 && !this.lanesSettling) {
+              this.measurementsCache = this.options.initialMeasurementsCache;
+              this.measurementsCache.forEach((item) => {
+                this.itemSizeCache.set(item.key, item.size);
+              });
+            }
+            const min = this.lanesSettling ? 0 : this.pendingMeasuredCacheIndexes.length > 0 ? Math.min(...this.pendingMeasuredCacheIndexes) : 0;
+            this.pendingMeasuredCacheIndexes = [];
+            if (this.lanesSettling && this.measurementsCache.length === count) {
+              this.lanesSettling = false;
+            }
+            const measurements = this.measurementsCache.slice(0, min);
+            const laneLastIndex = new Array(lanes).fill(
+              void 0
+            );
+            for (let m = 0; m < min; m++) {
+              const item = measurements[m];
+              if (item) {
+                laneLastIndex[item.lane] = m;
+              }
+            }
+            for (let i = min; i < count; i++) {
+              const key = getItemKey(i);
+              const cachedLane = this.laneAssignments.get(i);
+              let lane;
+              let start;
+              if (cachedLane !== void 0 && this.options.lanes > 1) {
+                lane = cachedLane;
+                const prevIndex = laneLastIndex[lane];
+                const prevInLane = prevIndex !== void 0 ? measurements[prevIndex] : void 0;
+                start = prevInLane ? prevInLane.end + this.options.gap : paddingStart + scrollMargin;
+              } else {
+                const furthestMeasurement = this.options.lanes === 1 ? measurements[i - 1] : this.getFurthestMeasurement(measurements, i);
+                start = furthestMeasurement ? furthestMeasurement.end + this.options.gap : paddingStart + scrollMargin;
+                lane = furthestMeasurement ? furthestMeasurement.lane : i % this.options.lanes;
+                if (this.options.lanes > 1) {
+                  this.laneAssignments.set(i, lane);
+                }
+              }
+              const measuredSize = itemSizeCache.get(key);
+              const size = typeof measuredSize === "number" ? measuredSize : this.options.estimateSize(i);
+              const end = start + size;
+              measurements[i] = {
+                index: i,
+                start,
+                size,
+                end,
+                key,
+                lane
+              };
+              laneLastIndex[lane] = i;
+            }
+            this.measurementsCache = measurements;
+            return measurements;
+          },
+          {
+            key: "production" !== "production",
+            debug: () => this.options.debug
+          }
+        );
+        this.calculateRange = memo(
+          () => [
+            this.getMeasurements(),
+            this.getSize(),
+            this.getScrollOffset(),
+            this.options.lanes
+          ],
+          (measurements, outerSize, scrollOffset, lanes) => {
+            return this.range = measurements.length > 0 && outerSize > 0 ? calculateRange({
+              measurements,
+              outerSize,
+              scrollOffset,
+              lanes
+            }) : null;
+          },
+          {
+            key: "production" !== "production",
+            debug: () => this.options.debug
+          }
+        );
+        this.getVirtualIndexes = memo(
+          () => {
+            let startIndex = null;
+            let endIndex = null;
+            const range = this.calculateRange();
+            if (range) {
+              startIndex = range.startIndex;
+              endIndex = range.endIndex;
+            }
+            this.maybeNotify.updateDeps([this.isScrolling, startIndex, endIndex]);
+            return [
+              this.options.rangeExtractor,
+              this.options.overscan,
+              this.options.count,
+              startIndex,
+              endIndex
+            ];
+          },
+          (rangeExtractor, overscan, count, startIndex, endIndex) => {
+            return startIndex === null || endIndex === null ? [] : rangeExtractor({
+              startIndex,
+              endIndex,
+              overscan,
+              count
+            });
+          },
+          {
+            key: "production" !== "production",
+            debug: () => this.options.debug
+          }
+        );
+        this.indexFromElement = (node) => {
+          const attributeName = this.options.indexAttribute;
+          const indexStr = node.getAttribute(attributeName);
+          if (!indexStr) {
+            console.warn(
+              `Missing attribute name '${attributeName}={index}' on measured element.`
+            );
+            return -1;
+          }
+          return parseInt(indexStr, 10);
+        };
+        this.shouldMeasureDuringScroll = (index) => {
+          var _a;
+          if (!this.scrollState || this.scrollState.behavior !== "smooth") {
+            return true;
+          }
+          const scrollIndex = this.scrollState.index ?? ((_a = this.getVirtualItemForOffset(this.scrollState.lastTargetOffset)) == null ? void 0 : _a.index);
+          if (scrollIndex !== void 0 && this.range) {
+            const bufferSize = Math.max(
+              this.options.overscan,
+              Math.ceil((this.range.endIndex - this.range.startIndex) / 2)
+            );
+            const minIndex = Math.max(0, scrollIndex - bufferSize);
+            const maxIndex = Math.min(
+              this.options.count - 1,
+              scrollIndex + bufferSize
+            );
+            return index >= minIndex && index <= maxIndex;
+          }
+          return true;
+        };
+        this.measureElement = (node) => {
+          if (!node) {
+            this.elementsCache.forEach((cached, key2) => {
+              if (!cached.isConnected) {
+                this.observer.unobserve(cached);
+                this.elementsCache.delete(key2);
+              }
+            });
+            return;
+          }
+          const index = this.indexFromElement(node);
+          const key = this.options.getItemKey(index);
+          const prevNode = this.elementsCache.get(key);
+          if (prevNode !== node) {
+            if (prevNode) {
+              this.observer.unobserve(prevNode);
+            }
+            this.observer.observe(node);
+            this.elementsCache.set(key, node);
+          }
+          if ((!this.isScrolling || this.scrollState) && this.shouldMeasureDuringScroll(index)) {
+            this.resizeItem(index, this.options.measureElement(node, void 0, this));
+          }
+        };
+        this.resizeItem = (index, size) => {
+          var _a;
+          const item = this.measurementsCache[index];
+          if (!item) return;
+          const itemSize = this.itemSizeCache.get(item.key) ?? item.size;
+          const delta = size - itemSize;
+          if (delta !== 0) {
+            if (((_a = this.scrollState) == null ? void 0 : _a.behavior) !== "smooth" && (this.shouldAdjustScrollPositionOnItemSizeChange !== void 0 ? this.shouldAdjustScrollPositionOnItemSizeChange(item, delta, this) : item.start < this.getScrollOffset() + this.scrollAdjustments)) {
+              this._scrollToOffset(this.getScrollOffset(), {
+                adjustments: this.scrollAdjustments += delta,
+                behavior: void 0
+              });
+            }
+            this.pendingMeasuredCacheIndexes.push(item.index);
+            this.itemSizeCache = new Map(this.itemSizeCache.set(item.key, size));
+            this.notify(false);
+          }
+        };
+        this.getVirtualItems = memo(
+          () => [this.getVirtualIndexes(), this.getMeasurements()],
+          (indexes, measurements) => {
+            const virtualItems = [];
+            for (let k = 0, len = indexes.length; k < len; k++) {
+              const i = indexes[k];
+              const measurement = measurements[i];
+              virtualItems.push(measurement);
+            }
+            return virtualItems;
+          },
+          {
+            key: "production" !== "production",
+            debug: () => this.options.debug
+          }
+        );
+        this.getVirtualItemForOffset = (offset) => {
+          const measurements = this.getMeasurements();
+          if (measurements.length === 0) {
+            return void 0;
+          }
+          return notUndefined(
+            measurements[findNearestBinarySearch(
+              0,
+              measurements.length - 1,
+              (index) => notUndefined(measurements[index]).start,
+              offset
+            )]
+          );
+        };
+        this.getMaxScrollOffset = () => {
+          if (!this.scrollElement) return 0;
+          if ("scrollHeight" in this.scrollElement) {
+            return this.options.horizontal ? this.scrollElement.scrollWidth - this.scrollElement.clientWidth : this.scrollElement.scrollHeight - this.scrollElement.clientHeight;
+          } else {
+            const doc = this.scrollElement.document.documentElement;
+            return this.options.horizontal ? doc.scrollWidth - this.scrollElement.innerWidth : doc.scrollHeight - this.scrollElement.innerHeight;
+          }
+        };
+        this.getOffsetForAlignment = (toOffset, align, itemSize = 0) => {
+          if (!this.scrollElement) return 0;
+          const size = this.getSize();
+          const scrollOffset = this.getScrollOffset();
+          if (align === "auto") {
+            align = toOffset >= scrollOffset + size ? "end" : "start";
+          }
+          if (align === "center") {
+            toOffset += (itemSize - size) / 2;
+          } else if (align === "end") {
+            toOffset -= size;
+          }
+          const maxOffset = this.getMaxScrollOffset();
+          return Math.max(Math.min(maxOffset, toOffset), 0);
+        };
+        this.getOffsetForIndex = (index, align = "auto") => {
+          index = Math.max(0, Math.min(index, this.options.count - 1));
+          const size = this.getSize();
+          const scrollOffset = this.getScrollOffset();
+          const item = this.measurementsCache[index];
+          if (!item) return;
+          if (align === "auto") {
+            if (item.end >= scrollOffset + size - this.options.scrollPaddingEnd) {
+              align = "end";
+            } else if (item.start <= scrollOffset + this.options.scrollPaddingStart) {
+              align = "start";
+            } else {
+              return [scrollOffset, align];
+            }
+          }
+          if (align === "end" && index === this.options.count - 1) {
+            return [this.getMaxScrollOffset(), align];
+          }
+          const toOffset = align === "end" ? item.end + this.options.scrollPaddingEnd : item.start - this.options.scrollPaddingStart;
+          return [
+            this.getOffsetForAlignment(toOffset, align, item.size),
+            align
+          ];
+        };
+        this.scrollToOffset = (toOffset, { align = "start", behavior = "auto" } = {}) => {
+          const offset = this.getOffsetForAlignment(toOffset, align);
+          const now = this.now();
+          this.scrollState = {
+            index: null,
+            align,
+            behavior,
+            startedAt: now,
+            lastTargetOffset: offset,
+            stableFrames: 0
+          };
+          this._scrollToOffset(offset, { adjustments: void 0, behavior });
+          this.scheduleScrollReconcile();
+        };
+        this.scrollToIndex = (index, {
+          align: initialAlign = "auto",
+          behavior = "auto"
+        } = {}) => {
+          index = Math.max(0, Math.min(index, this.options.count - 1));
+          const offsetInfo = this.getOffsetForIndex(index, initialAlign);
+          if (!offsetInfo) {
+            return;
+          }
+          const [offset, align] = offsetInfo;
+          const now = this.now();
+          this.scrollState = {
+            index,
+            align,
+            behavior,
+            startedAt: now,
+            lastTargetOffset: offset,
+            stableFrames: 0
+          };
+          this._scrollToOffset(offset, { adjustments: void 0, behavior });
+          this.scheduleScrollReconcile();
+        };
+        this.scrollBy = (delta, { behavior = "auto" } = {}) => {
+          const offset = this.getScrollOffset() + delta;
+          const now = this.now();
+          this.scrollState = {
+            index: null,
+            align: "start",
+            behavior,
+            startedAt: now,
+            lastTargetOffset: offset,
+            stableFrames: 0
+          };
+          this._scrollToOffset(offset, { adjustments: void 0, behavior });
+          this.scheduleScrollReconcile();
+        };
+        this.getTotalSize = () => {
+          var _a;
+          const measurements = this.getMeasurements();
+          let end;
+          if (measurements.length === 0) {
+            end = this.options.paddingStart;
+          } else if (this.options.lanes === 1) {
+            end = ((_a = measurements[measurements.length - 1]) == null ? void 0 : _a.end) ?? 0;
+          } else {
+            const endByLane = Array(this.options.lanes).fill(null);
+            let endIndex = measurements.length - 1;
+            while (endIndex >= 0 && endByLane.some((val) => val === null)) {
+              const item = measurements[endIndex];
+              if (endByLane[item.lane] === null) {
+                endByLane[item.lane] = item.end;
+              }
+              endIndex--;
+            }
+            end = Math.max(...endByLane.filter((val) => val !== null));
+          }
+          return Math.max(
+            end - this.options.scrollMargin + this.options.paddingEnd,
+            0
+          );
+        };
+        this._scrollToOffset = (offset, {
+          adjustments,
+          behavior
+        }) => {
+          this.options.scrollToFn(offset, { behavior, adjustments }, this);
+        };
+        this.measure = () => {
+          this.itemSizeCache = /* @__PURE__ */ new Map();
+          this.laneAssignments = /* @__PURE__ */ new Map();
+          this.notify(false);
+        };
+        this.setOptions(opts);
+      }
+      scheduleScrollReconcile() {
+        if (!this.targetWindow) {
+          this.scrollState = null;
+          return;
+        }
+        if (this.rafId != null) return;
+        this.rafId = this.targetWindow.requestAnimationFrame(() => {
+          this.rafId = null;
+          this.reconcileScroll();
+        });
+      }
+      reconcileScroll() {
+        if (!this.scrollState) return;
+        const el = this.scrollElement;
+        if (!el) return;
+        const MAX_RECONCILE_MS = 5e3;
+        if (this.now() - this.scrollState.startedAt > MAX_RECONCILE_MS) {
+          this.scrollState = null;
+          return;
+        }
+        const offsetInfo = this.scrollState.index != null ? this.getOffsetForIndex(this.scrollState.index, this.scrollState.align) : void 0;
+        const targetOffset = offsetInfo ? offsetInfo[0] : this.scrollState.lastTargetOffset;
+        const STABLE_FRAMES = 1;
+        const targetChanged = targetOffset !== this.scrollState.lastTargetOffset;
+        if (!targetChanged && approxEqual(targetOffset, this.getScrollOffset())) {
+          this.scrollState.stableFrames++;
+          if (this.scrollState.stableFrames >= STABLE_FRAMES) {
+            this.scrollState = null;
+            return;
+          }
+        } else {
+          this.scrollState.stableFrames = 0;
+          if (targetChanged) {
+            this.scrollState.lastTargetOffset = targetOffset;
+            this.scrollState.behavior = "auto";
+            this._scrollToOffset(targetOffset, {
+              adjustments: void 0,
+              behavior: "auto"
+            });
+          }
+        }
+        this.scheduleScrollReconcile();
+      }
+    }
+    const findNearestBinarySearch = (low, high, getCurrentValue, value) => {
+      while (low <= high) {
+        const middle = (low + high) / 2 | 0;
+        const currentValue = getCurrentValue(middle);
+        if (currentValue < value) {
+          low = middle + 1;
+        } else if (currentValue > value) {
+          high = middle - 1;
+        } else {
+          return middle;
+        }
+      }
+      if (low > 0) {
+        return low - 1;
+      } else {
+        return 0;
+      }
+    };
+    function calculateRange({
+      measurements,
+      outerSize,
+      scrollOffset,
+      lanes
+    }) {
+      const lastIndex = measurements.length - 1;
+      const getOffset = (index) => measurements[index].start;
+      if (measurements.length <= lanes) {
+        return {
+          startIndex: 0,
+          endIndex: lastIndex
+        };
+      }
+      let startIndex = findNearestBinarySearch(
+        0,
+        lastIndex,
+        getOffset,
+        scrollOffset
+      );
+      let endIndex = startIndex;
+      if (lanes === 1) {
+        while (endIndex < lastIndex && measurements[endIndex].end < scrollOffset + outerSize) {
+          endIndex++;
+        }
+      } else if (lanes > 1) {
+        const endPerLane = Array(lanes).fill(0);
+        while (endIndex < lastIndex && endPerLane.some((pos) => pos < scrollOffset + outerSize)) {
+          const item = measurements[endIndex];
+          endPerLane[item.lane] = item.end;
+          endIndex++;
+        }
+        const startPerLane = Array(lanes).fill(scrollOffset + outerSize);
+        while (startIndex >= 0 && startPerLane.some((pos) => pos >= scrollOffset)) {
+          const item = measurements[startIndex];
+          startPerLane[item.lane] = item.start;
+          startIndex--;
+        }
+        startIndex = Math.max(0, startIndex - startIndex % lanes);
+        endIndex = Math.min(lastIndex, endIndex + (lanes - 1 - endIndex % lanes));
+      }
+      return { startIndex, endIndex };
+    }
+
+    class VirtualizedRenderer {
+        constructor(options) {
+            this.options = options;
+            this.cleanup = null;
+            this.elementCache = new Map();
+            this.frameId = 0;
+            this.topSpacer = this.createSpacer();
+            this.bottomSpacer = this.createSpacer();
+            this.virtualizer = new Virtualizer({
+                count: options.items.length,
+                getScrollElement: () => options.scrollElement,
+                estimateSize: index => options.items[index]?.estimatedSize ?? 0,
+                scrollToFn: elementScroll,
+                observeElementRect,
+                observeElementOffset,
+                overscan: options.overscan,
+                onChange: () => this.scheduleSync()
+            });
+        }
+        mount() {
+            this.cleanup = this.virtualizer._didMount();
+            this.virtualizer._willUpdate();
+            this.sync();
+        }
+        destroy() {
+            if (this.frameId) {
+                cancelAnimationFrame(this.frameId);
+                this.frameId = 0;
+            }
+            this.cleanup?.();
+            this.cleanup = null;
+            this.hostElement.replaceChildren();
+            this.elementCache.clear();
+        }
+        get hostElement() {
+            return this.options.hostElement;
+        }
+        createSpacer() {
+            return Object.assign(this.options.document.createElement("div"), {
+                ariaHidden: "true"
+            });
+        }
+        scheduleSync() {
+            if (this.frameId) {
+                return;
+            }
+            this.frameId = requestAnimationFrame(() => {
+                this.frameId = 0;
+                this.sync();
+            });
+        }
+        sync() {
+            const virtualItems = this.virtualizer.getVirtualItems();
+            const nextCache = new Map();
+            const fragment = this.options.document.createDocumentFragment();
+            const first = virtualItems[0];
+            const last = virtualItems[virtualItems.length - 1];
+            const totalSize = this.virtualizer.getTotalSize();
+            this.topSpacer.style.height = `${first?.start ?? 0}px`;
+            this.topSpacer.style.width = "1px";
+            this.bottomSpacer.style.height = `${Math.max(0, totalSize - (last?.end ?? 0))}px`;
+            this.bottomSpacer.style.width = "1px";
+            fragment.appendChild(this.topSpacer);
+            for (const item of virtualItems) {
+                const element = this.elementCache.get(item.index) ?? this.options.renderItem(item.index);
+                element.dataset.index = `${item.index}`;
+                nextCache.set(item.index, element);
+                fragment.appendChild(element);
+            }
+            fragment.appendChild(this.bottomSpacer);
+            this.options.hostElement.replaceChildren(fragment);
+            for (const item of virtualItems) {
+                this.virtualizer.measureElement(nextCache.get(item.index));
+            }
+            this.elementCache = nextCache;
+            this.options.onRendered?.();
+        }
+    }
+
     const ns = {
         svg: "http://www.w3.org/2000/svg",
         mathML: "http://www.w3.org/1998/Math/MathML"
@@ -2858,6 +5100,7 @@
             this.className = "docx";
             this.styleMap = {};
             this.currentPart = null;
+            this.currentSectionProps = null;
             this.tableVerticalMerges = [];
             this.currentVerticalMerge = null;
             this.tableCellPositions = [];
@@ -2870,6 +5113,7 @@
             this.commentMap = {};
             this.tasks = [];
             this.postRenderTasks = [];
+            this.pageVirtualizer = null;
         }
         async render(document, bodyContainer, styleContainer = null, options) {
             this.document = document;
@@ -2878,6 +5122,16 @@
             this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
             this.styleMap = null;
             this.tasks = [];
+            this.postRenderTasks = [];
+            this.currentTabs = [];
+            this.currentEndnoteIds = [];
+            this.commentMap = {};
+            this.footnoteMap = {};
+            this.endnoteMap = {};
+            this.usedHederFooterParts = [];
+            this.currentSectionProps = null;
+            this.pageVirtualizer?.destroy();
+            this.pageVirtualizer = null;
             if (this.options.renderComments && globalThis.Highlight) {
                 this.commentHighlight = new Highlight();
             }
@@ -2911,17 +5165,47 @@
             }
             if (!options.ignoreFonts && document.fontTablePart)
                 this.renderFontTable(document.fontTablePart, styleContainer);
-            var sectionElements = this.renderSections(document.documentPart.body);
-            if (this.options.inWrapper) {
-                bodyContainer.appendChild(this.renderWrapper(sectionElements));
+            const pages = this.buildPages(document.documentPart.body);
+            const scrollElement = this.resolveVirtualScrollElement(bodyContainer, pages);
+            let bodyHost = bodyContainer;
+            if (scrollElement) {
+                bodyHost = this.options.inWrapper ? this.renderWrapper([]) : this.createElement("div");
+                bodyHost.dataset.docxPageCount = `${pages.length}`;
+                bodyHost.dataset.docxVirtualized = "true";
+                if (this.options.inWrapper || bodyHost !== bodyContainer) {
+                    bodyContainer.appendChild(bodyHost);
+                }
+                this.pageVirtualizer = new VirtualizedRenderer({
+                    document: this.htmlDocument,
+                    hostElement: bodyHost,
+                    scrollElement,
+                    items: pages.map(page => ({
+                        key: page.key,
+                        estimatedSize: page.estimatedHeight
+                    })),
+                    overscan: this.options.virtualizePagesOverscan,
+                    renderItem: index => this.renderPage(pages[index], document.documentPart.body),
+                    onRendered: () => {
+                        this.flushPostRenderTasks();
+                        this.refreshTabStops();
+                    }
+                });
+                this.pageVirtualizer.mount();
             }
             else {
-                appendChildren(bodyContainer, sectionElements);
+                var sectionElements = pages.map(page => this.renderPage(page, document.documentPart.body));
+                bodyHost.dataset.docxPageCount = `${pages.length}`;
+                if (this.options.inWrapper) {
+                    bodyContainer.appendChild(this.renderWrapper(sectionElements));
+                }
+                else {
+                    appendChildren(bodyContainer, sectionElements);
+                }
             }
             if (this.commentHighlight && options.renderComments) {
                 CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
             }
-            this.postRenderTasks.forEach(t => t());
+            this.flushPostRenderTasks();
             await Promise.allSettled(this.tasks);
             this.refreshTabStops();
         }
@@ -3068,36 +5352,60 @@
             }
             return elem;
         }
-        renderSections(document) {
+        buildPages(document) {
             const result = [];
+            const allEndnoteIds = [];
             this.processElement(document);
             const sections = this.splitBySection(document.children, document.props);
             const pages = this.groupByPageBreaks(sections);
             let prevProps = null;
             for (let i = 0, l = pages.length; i < l; i++) {
-                this.currentFootnoteIds = [];
-                const section = pages[i][0];
-                let props = section.sectProps;
-                const pageElement = this.createPageElement(this.className, props);
-                this.renderStyleValues(document.cssStyle, pageElement);
-                this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props, result.length, prevProps != props, pageElement);
-                for (const sect of pages[i]) {
-                    var contentElement = this.createSectionContent(sect.sectProps);
-                    this.renderElements(sect.elements, contentElement);
-                    pageElement.appendChild(contentElement);
-                    props = sect.sectProps;
+                const pageSections = pages[i];
+                const pageProps = pageSections[0].sectProps;
+                let footerProps = pageProps;
+                const initialEndnoteIds = allEndnoteIds.slice();
+                for (const sect of pageSections) {
+                    this.collectEndnoteIds(sect.elements, allEndnoteIds);
+                    footerProps = sect.sectProps;
                 }
-                if (this.options.renderFootnotes) {
-                    this.renderNotes(this.currentFootnoteIds, this.footnoteMap, pageElement);
-                }
-                if (this.options.renderEndnotes && i == l - 1) {
-                    this.renderNotes(this.currentEndnoteIds, this.endnoteMap, pageElement);
-                }
-                this.options.renderFooters && this.renderHeaderFooter(props.footerRefs, props, result.length, prevProps != props, pageElement);
-                result.push(pageElement);
-                prevProps = props;
+                result.push({
+                    index: i,
+                    key: i,
+                    sections: pageSections,
+                    pageProps,
+                    footerProps,
+                    firstOfSection: prevProps != pageProps,
+                    initialEndnoteIds,
+                    estimatedHeight: this.estimatePageHeight(pageProps),
+                    isLastPage: i == l - 1
+                });
+                prevProps = footerProps;
             }
             return result;
+        }
+        renderPage(page, document) {
+            this.currentFootnoteIds = [];
+            this.currentEndnoteIds = page.initialEndnoteIds.slice();
+            const pageElement = this.createPageElement(this.className, page.pageProps);
+            this.renderStyleValues(document.cssStyle, pageElement);
+            this.options.renderHeaders && this.renderHeaderFooter(page.pageProps.headerRefs, page.pageProps, page.index, page.firstOfSection, pageElement);
+            for (const sect of page.sections) {
+                const contentElement = this.createSectionContent(sect.sectProps);
+                if (this.options.mergeAdjacent) {
+                    sect.elements.forEach(element => this.ensureOptimizedTree(element));
+                }
+                this.currentSectionProps = sect.sectProps;
+                this.renderElements(sect.elements, contentElement);
+                pageElement.appendChild(contentElement);
+            }
+            if (this.options.renderFootnotes) {
+                this.renderNotes(this.currentFootnoteIds, this.footnoteMap, pageElement);
+            }
+            if (this.options.renderEndnotes && page.isLastPage) {
+                this.renderNotes(this.currentEndnoteIds, this.endnoteMap, pageElement);
+            }
+            this.options.renderFooters && this.renderHeaderFooter(page.footerProps.footerRefs, page.footerProps, page.index, page.firstOfSection, pageElement);
+            return pageElement;
         }
         renderHeaderFooter(refs, props, page, firstOfSection, into) {
             if (!refs)
@@ -3107,10 +5415,16 @@
                 ?? refs.find(x => x.type == "default");
             var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart);
             if (part) {
+                const previousPart = this.currentPart;
+                const previousSectionProps = this.currentSectionProps;
                 this.currentPart = part;
+                this.currentSectionProps = props;
                 if (!this.usedHederFooterParts.includes(part.path)) {
                     this.processElement(part.rootElement);
                     this.usedHederFooterParts.push(part.path);
+                }
+                if (this.options.mergeAdjacent) {
+                    this.ensureOptimizedTree(part.rootElement);
                 }
                 const [el] = this.renderElements([part.rootElement], into);
                 if (props?.pageMargins) {
@@ -3123,7 +5437,8 @@
                         el.style.minHeight = `calc(${props.pageMargins.bottom} - ${props.pageMargins.footer})`;
                     }
                 }
-                this.currentPart = null;
+                this.currentPart = previousPart;
+                this.currentSectionProps = previousSectionProps;
             }
         }
         isPageBreakElement(elem) {
@@ -3324,6 +5639,12 @@ section.${c}>footer { z-index: 1; }
         renderNotes(noteIds, notesMap, into) {
             var notes = noteIds.map(id => notesMap[id]).filter(x => x);
             if (notes.length > 0) {
+                notes.forEach(note => {
+                    this.processElement(note);
+                    if (this.options.mergeAdjacent) {
+                        this.ensureOptimizedTree(note);
+                    }
+                });
                 var result = this.createElement("ol", null, this.renderElements(notes));
                 into.appendChild(result);
             }
@@ -3548,10 +5869,27 @@ section.${c}>footer { z-index: 1; }
         }
         renderDrawing(elem) {
             var result = this.renderContainer(elem, "div");
+            const anchor = elem.props?.drawingAnchor;
+            const pageMargins = this.currentSectionProps?.pageMargins;
+            const isPageRelativeAnchor = anchor?.wrapType == "wrapNone"
+                && pageMargins
+                && (anchor?.posX?.relative == "page" || anchor?.posY?.relative == "page");
             result.style.display = "inline-block";
-            result.style.position = "relative";
             result.style.textIndent = "0px";
             this.renderStyleValues(elem.cssStyle, result);
+            if (isPageRelativeAnchor) {
+                result.style.display = "block";
+                result.style.position = "absolute";
+                if (anchor.posX?.relative == "page" && anchor.posX.offset) {
+                    result.style.left = `calc(${anchor.posX.offset} - ${pageMargins.left ?? "0px"})`;
+                }
+                if (anchor.posY?.relative == "page" && anchor.posY.offset) {
+                    result.style.top = `calc(${anchor.posY.offset} - ${pageMargins.top ?? "0px"})`;
+                }
+            }
+            else if (!result.style.position) {
+                result.style.position = "relative";
+            }
             return result;
         }
         renderImage(elem) {
@@ -3839,6 +6177,8 @@ section.${c}>footer { z-index: 1; }
             return result;
         }
         renderStyleValues(style, ouput) {
+            if (!style)
+                return;
             for (let k in style) {
                 if (k.startsWith("$")) {
                     ouput.setAttribute(k.slice(1), style[k]);
@@ -3958,6 +6298,80 @@ section.${c}>footer { z-index: 1; }
         later(func) {
             this.postRenderTasks.push(func);
         }
+        flushPostRenderTasks(fromIndex = 0) {
+            if (fromIndex >= this.postRenderTasks.length)
+                return;
+            const tasks = this.postRenderTasks.splice(fromIndex);
+            tasks.forEach(task => task());
+        }
+        resolveVirtualScrollElement(bodyContainer, pages) {
+            if (!this.options.virtualizePages || pages.length < 2 || this.options.renderComments)
+                return null;
+            return findScrollableElement(bodyContainer, this.htmlDocument);
+        }
+        collectEndnoteIds(elements, output) {
+            if (!elements)
+                return;
+            for (const element of elements) {
+                if (element.type == DomType.EndnoteReference) {
+                    output.push(element.id);
+                }
+                if (element.children?.length) {
+                    this.collectEndnoteIds(element.children, output);
+                }
+            }
+        }
+        estimatePageHeight(props) {
+            const defaultPageHeight = 1122;
+            const pageHeight = parseSizeToPixels(props?.pageSize?.height) ?? defaultPageHeight;
+            return pageHeight + (this.options.inWrapper ? 30 : 0);
+        }
+        optimizeChildren(children) {
+            const result = [];
+            for (const child of children) {
+                const previous = result[result.length - 1];
+                if (this.canMergeRuns(previous, child)) {
+                    for (const grandChild of child.children ?? []) {
+                        grandChild.parent = previous;
+                        previous.children.push(grandChild);
+                    }
+                    continue;
+                }
+                if (this.canMergeText(previous, child)) {
+                    previous.text += child.text;
+                    continue;
+                }
+                result.push(child);
+            }
+            return result;
+        }
+        ensureOptimizedTree(element) {
+            if (element.__optimizedRuns)
+                return;
+            if (element.children?.length) {
+                element.children.forEach(child => this.ensureOptimizedTree(child));
+                element.children = this.optimizeChildren(element.children);
+                element.children.forEach(child => child.parent = element);
+            }
+            element.__optimizedRuns = true;
+        }
+        canMergeRuns(left, right) {
+            if (!left || !right || left.type != DomType.Run || right.type != DomType.Run)
+                return false;
+            if (left.fieldRun || right.fieldRun || left.id || right.id)
+                return false;
+            if (left.verticalAlign != right.verticalAlign || left.className != right.className || left.styleName != right.styleName)
+                return false;
+            if (!sameStyleMap(left.cssStyle, right.cssStyle))
+                return false;
+            return this.hasSimpleInlineChildren(left) && this.hasSimpleInlineChildren(right);
+        }
+        canMergeText(left, right) {
+            return left?.type == DomType.Text && right?.type == DomType.Text;
+        }
+        hasSimpleInlineChildren(run) {
+            return (run.children ?? []).every(child => simpleInlineChildTypes.has(child.type));
+        }
     }
     function removeAllElements(elem) {
         elem.innerHTML = '';
@@ -3970,6 +6384,55 @@ section.${c}>footer { z-index: 1; }
         while (parent != null && parent.type != type)
             parent = parent.parent;
         return parent;
+    }
+    function findScrollableElement(elem, htmlDocument) {
+        const defaultView = htmlDocument.defaultView;
+        let current = elem;
+        while (current) {
+            const style = defaultView?.getComputedStyle(current);
+            const overflowY = style?.overflowY ?? '';
+            const overflow = style?.overflow ?? '';
+            if (/(auto|scroll|overlay)/.test(`${overflowY} ${overflow}`)) {
+                return current;
+            }
+            current = current.parentElement;
+        }
+        return null;
+    }
+    function parseSizeToPixels(value) {
+        if (!value)
+            return null;
+        const match = /^(-?\d*\.?\d+)(px|pt|pc|in|cm|mm|q)?$/i.exec(value.trim());
+        if (!match)
+            return null;
+        const amount = parseFloat(match[1]);
+        const unit = (match[2] ?? "px").toLowerCase();
+        switch (unit) {
+            case "pt": return amount * 96 / 72;
+            case "pc": return amount * 16;
+            case "in": return amount * 96;
+            case "cm": return amount * 96 / 2.54;
+            case "mm": return amount * 96 / 25.4;
+            case "q": return amount * 96 / 101.6;
+            default: return amount;
+        }
+    }
+    const simpleInlineChildTypes = new Set([
+        DomType.Text,
+        DomType.DeletedText,
+        DomType.Break,
+        DomType.Tab,
+        DomType.NoBreakHyphen,
+        DomType.Symbol,
+        DomType.FootnoteReference,
+        DomType.EndnoteReference,
+    ]);
+    function sameStyleMap(left, right) {
+        const leftKeys = Object.keys(left ?? {});
+        const rightKeys = Object.keys(right ?? {});
+        if (leftKeys.length != rightKeys.length)
+            return false;
+        return leftKeys.every(key => left[key] == right[key]);
     }
 
     const defaultOptions = {
@@ -3991,7 +6454,11 @@ section.${c}>footer { z-index: 1; }
         useBase64URL: false,
         renderChanges: false,
         renderComments: false,
-        renderAltChunks: true
+        renderAltChunks: true,
+        virtualizePages: false,
+        virtualizePagesOverscan: 2,
+        useWorkerParser: false,
+        mergeAdjacent: false
     };
     function parseAsync(data, userOptions) {
         const ops = { ...defaultOptions, ...userOptions };

@@ -3,9 +3,9 @@ module.exports = (config) => {
     basePath: '',
     frameworks: ['jasmine'],
     files: [
-      'node_modules/jszip/dist/jszip.js',
       'node_modules/diff/dist/diff.js',
       'dist/docx-preview.js',
+      { pattern: 'dist/docx-preview-worker.js', included: false },
       'tests/**/*spec.js',
       { pattern: 'tests/**/*.docx', included: false },
       { pattern: 'tests/**/*.html', included: false }

@@ -1,0 +1,68 @@
+import { WmlTable, IDomNumbering, WmlHyperlink, WmlSmartTag, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlTableRow, NumberingPicBullet, WmlAltChunk } from './document/dom';
+import { DocumentElement } from './document/document';
+import { WmlParagraph } from './document/paragraph';
+import { WmlRun } from './document/run';
+import { IDomStyle, IDomSubStyle } from './document/style';
+export declare var autos: {
+    shd: string;
+    color: string;
+    borderColor: string;
+    highlight: string;
+};
+export interface DocumentParserOptions {
+    ignoreWidth: boolean;
+    debug: boolean;
+}
+export declare class DocumentParser {
+    options: DocumentParserOptions;
+    constructor(options?: Partial<DocumentParserOptions>);
+    parseNotes(xmlDoc: Element, elemName: string, elemClass: any): any[];
+    parseComments(xmlDoc: Element): any[];
+    parseDocumentFile(xmlDoc: Element): DocumentElement;
+    parseBackground(elem: Element): any;
+    parseBodyElements(element: Element): OpenXmlElement[];
+    parseStylesFile(xstyles: Element): IDomStyle[];
+    parseDefaultStyles(node: Element): IDomStyle;
+    parseStyle(node: Element): IDomStyle;
+    parseTableStyle(node: Element): IDomSubStyle[];
+    parseNumberingFile(node: Element): IDomNumbering[];
+    parseNumberingPicBullet(elem: Element): NumberingPicBullet;
+    parseAbstractNumbering(node: Element, bullets: any[]): IDomNumbering[];
+    parseNumberingLevel(id: string, node: Element, bullets: any[]): IDomNumbering;
+    parseSdt(node: Element, parser: Function): OpenXmlElement[];
+    parseInserted(node: Element, parentParser: Function): OpenXmlElement;
+    parseDeleted(node: Element, parentParser: Function): OpenXmlElement;
+    parseAltChunk(node: Element): WmlAltChunk;
+    parseParagraph(node: Element): OpenXmlElement;
+    parseParagraphProperties(elem: Element, paragraph: WmlParagraph): void;
+    parseFrame(node: Element, paragraph: WmlParagraph): void;
+    parseHyperlink(node: Element, parent?: OpenXmlElement): WmlHyperlink;
+    parseSmartTag(node: Element, parent?: OpenXmlElement): WmlSmartTag;
+    parseRun(node: Element, parent?: OpenXmlElement): WmlRun;
+    parseMathElement(elem: Element): OpenXmlElement;
+    parseMathProperies(elem: Element): Record<string, any>;
+    parseRunProperties(elem: Element, run: WmlRun): void;
+    parseVmlPicture(elem: Element): OpenXmlElement;
+    checkAlternateContent(elem: Element): Element;
+    parseDrawing(node: Element): OpenXmlElement;
+    parseDrawingWrapper(node: Element): OpenXmlElement;
+    parseGraphic(elem: Element): OpenXmlElement;
+    parsePicture(elem: Element): IDomImage;
+    parseTable(node: Element): WmlTable;
+    parseTableColumns(node: Element): WmlTableColumn[];
+    parseTableProperties(elem: Element, table: WmlTable): void;
+    parseTablePosition(node: Element, table: WmlTable): void;
+    parseTableRow(node: Element): WmlTableRow;
+    parseTableRowProperties(elem: Element, row: WmlTableRow): void;
+    parseTableCell(node: Element): OpenXmlElement;
+    parseTableCellProperties(elem: Element, cell: WmlTableCell): void;
+    parseTableCellVerticalText(elem: Element, cell: WmlTableCell): void;
+    parseDefaultProperties(elem: Element, style?: Record<string, string>, childStyle?: Record<string, string>, handler?: (prop: Element) => boolean): Record<string, string>;
+    parseUnderline(node: Element, style: Record<string, string>): void;
+    parseFont(node: Element, style: Record<string, string>): void;
+    parseIndentation(node: Element, style: Record<string, string>): void;
+    parseSpacing(node: Element, style: Record<string, string>): void;
+    parseMarginProperties(node: Element, output: Record<string, string>): void;
+    parseTrHeight(node: Element, output: Record<string, string>): void;
+    parseBorderProperties(node: Element, output: Record<string, string>): void;
+}

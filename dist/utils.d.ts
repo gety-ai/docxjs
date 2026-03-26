@@ -1,0 +1,13 @@
+export declare function escapeClassName(className: string): string;
+export declare function encloseFontFamily(fontFamily: string): string;
+export declare function splitPath(path: string): [string, string];
+export declare function resolvePath(path: string, base: string): string;
+export declare function keyBy<T = any>(array: T[], by: (x: T) => any): Record<any, T>;
+export declare function blobToBase64(blob: Blob): Promise<string>;
+export declare function isObject(item: any): boolean;
+export declare function isString(item: unknown): item is string;
+export declare function mergeDeep(target: any, ...sources: any[]): any;
+export declare function parseCssRules(text: string): Record<string, string>;
+export declare function formatCssRules(style: Record<string, string>): string;
+export declare function asArray<T>(val: T | T[]): T[];
+export declare function clamp(val: any, min: any, max: any): any;

@@ -1,12 +1,10 @@
-import { OutputType } from "jszip";
-
 import { DocumentParser } from './document-parser';
 import { Relationship, RelationshipTypes } from './common/relationship';
 import { Part } from './common/part';
 import { FontTablePart } from './font-table/font-table';
-import { OpenXmlPackage } from './common/open-xml-package';
+import { OpenXmlPackage, OpenXmlPackageLoadType, OpenXmlPackageSaveType } from './common/open-xml-package';
 import { DocumentPart } from './document/document-part';
-import { blobToBase64, resolvePath, splitPath } from './utils';
+import { blobToBase64, keyBy, resolvePath, splitPath } from './utils';
 import { NumberingPart } from './numbering/numbering-part';
 import { StylesPart } from './styles/styles-part';
 import { FooterPart, HeaderPart } from "./header-footer/parts";
@@ -18,6 +16,8 @@ import { SettingsPart } from "./settings/settings-part";
 import { CustomPropsPart } from "./document-props/custom-props-part";
 import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
+import { parseDocumentInWorker } from "./worker/client";
+import { SerializedFileEntry, SerializedWordDocument } from "./worker/worker-types";
 
 const topLevelRels = [
 	{ type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
@@ -44,6 +44,7 @@ export class WordDocument {
 	themePart: ThemePart;
 	corePropsPart: CorePropsPart;
 	extendedPropsPart: ExtendedPropsPart;
+	customPropsPart: CustomPropsPart;
 	settingsPart: SettingsPart;
 	commentsPart: CommentsPart;
 	commentsExtendedPart: CommentsExtendedPart;
@@ -53,6 +54,23 @@ export class WordDocument {
 
 		d._options = options;
 		d._parser = parser;
+
+		if (options.useWorkerParser) {
+			try {
+				const parsed = await parseDocumentInWorker(blob, options);
+
+				if (parsed) {
+					d._package = OpenXmlPackage.fromFiles(fileEntriesToMap(parsed.files), options);
+					d.applySerializedDocument(parsed);
+					return d;
+				}
+			} catch (error) {
+				if (options.debug) {
+					console.warn("DOCX: Worker parser failed, falling back to main thread", error);
+				}
+			}
+		}
+
 		d._package = await OpenXmlPackage.load(blob, options);
 		d.rels = await d._package.loadRelationships();
 
@@ -64,7 +82,27 @@ export class WordDocument {
 		return d;
 	}
 
-	save(type = "blob"): Promise<any> {
+	private applySerializedDocument(data: SerializedWordDocument) {
+		this.rels = data.rels;
+		this.parts = data.parts.map(part => ({ ...part })) as any[];
+		this.partsMap = keyBy(this.parts, x => x.path) as any;
+
+		this.documentPart = data.rolePaths.documentPart ? this.partsMap[data.rolePaths.documentPart] as any : null;
+		this.fontTablePart = data.rolePaths.fontTablePart ? this.partsMap[data.rolePaths.fontTablePart] as any : null;
+		this.numberingPart = data.rolePaths.numberingPart ? this.partsMap[data.rolePaths.numberingPart] as any : null;
+		this.stylesPart = data.rolePaths.stylesPart ? this.partsMap[data.rolePaths.stylesPart] as any : null;
+		this.footnotesPart = data.rolePaths.footnotesPart ? this.partsMap[data.rolePaths.footnotesPart] as any : null;
+		this.endnotesPart = data.rolePaths.endnotesPart ? this.partsMap[data.rolePaths.endnotesPart] as any : null;
+		this.themePart = data.rolePaths.themePart ? this.partsMap[data.rolePaths.themePart] as any : null;
+		this.corePropsPart = data.rolePaths.corePropsPart ? this.partsMap[data.rolePaths.corePropsPart] as any : null;
+		this.extendedPropsPart = data.rolePaths.extendedPropsPart ? this.partsMap[data.rolePaths.extendedPropsPart] as any : null;
+		this.customPropsPart = data.rolePaths.customPropsPart ? this.partsMap[data.rolePaths.customPropsPart] as any : null;
+		this.settingsPart = data.rolePaths.settingsPart ? this.partsMap[data.rolePaths.settingsPart] as any : null;
+		this.commentsPart = data.rolePaths.commentsPart ? this.partsMap[data.rolePaths.commentsPart] as any : null;
+		this.commentsExtendedPart = data.rolePaths.commentsExtendedPart ? this.partsMap[data.rolePaths.commentsExtendedPart] as any : null;
+	}
+
+	save(type: OpenXmlPackageSaveType = "blob"): Promise<any> {
 		return this._package.save(type);
 	}
 
@@ -197,10 +235,20 @@ export class WordDocument {
 		return rel ? resolvePath(rel.target, folder) : null;
 	}
 
-	private loadResource(part: Part, id: string, outputType: OutputType) {
+	private loadResource(part: Part, id: string, outputType: OpenXmlPackageLoadType) {
 		const path = this.getPathById(part, id);
 		return path ? this._package.load(path, outputType) : Promise.resolve(null);
 	}
+}
+
+function fileEntriesToMap(files: SerializedFileEntry[]) {
+	const result: Record<string, Uint8Array> = {};
+
+	for (const file of files) {
+		result[file.path] = new Uint8Array(file.buffer);
+	}
+
+	return result;
 }
 
 export function deobfuscate(data: Uint8Array, guidKey: string) {

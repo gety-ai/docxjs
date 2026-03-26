@@ -30,11 +30,12 @@ export function serializeXmlString(elem: Node): string {
 export class XmlParser {
     elements(elem: Element, localName: string = null): Element[] {
         const result = [];
+        const childNodes = getChildNodes(elem);
 
-        for (let i = 0, l = elem.childNodes.length; i < l; i++) {
-            let c = elem.childNodes.item(i);
+        for (let i = 0, l = childNodes.length; i < l; i++) {
+            let c = childNodes[i];
 
-            if (c.nodeType == Node.ELEMENT_NODE && (localName == null || (c as Element).localName == localName))
+            if (isElementNode(c) && (localName == null || getLocalName(c) == localName))
                 result.push(c);
         }
 
@@ -42,10 +43,12 @@ export class XmlParser {
     }
 
     element(elem: Element, localName: string): Element {
-        for (let i = 0, l = elem.childNodes.length; i < l; i++) {
-            let c = elem.childNodes.item(i);
+        const childNodes = getChildNodes(elem);
 
-            if (c.nodeType == 1 && (c as Element).localName == localName)
+        for (let i = 0, l = childNodes.length; i < l; i++) {
+            let c = childNodes[i];
+
+            if (isElementNode(c) && getLocalName(c) == localName)
                 return c as Element;
         }
 
@@ -58,12 +61,14 @@ export class XmlParser {
     }
 
 	attrs(elem: Element) {
-		return Array.from(elem.attributes);
+		return getAttributes(elem);
 	}
 
     attr(elem: Element, localName: string): string {
-        for (let i = 0, l = elem.attributes.length; i < l; i++) {
-            let a = elem.attributes.item(i);
+        const attributes = getAttributes(elem);
+
+        for (let i = 0, l = attributes.length; i < l; i++) {
+            let a = attributes[i];
 
             if (a.localName == localName)
                 return a.value;
@@ -99,3 +104,31 @@ export class XmlParser {
 const globalXmlParser = new XmlParser();
 
 export default globalXmlParser;
+
+function getChildNodes(elem: any): any[] {
+    if (!elem?.childNodes)
+        return [];
+
+    if (Array.isArray(elem.childNodes))
+        return elem.childNodes;
+
+    return Array.from(elem.childNodes);
+}
+
+function getAttributes(elem: any): any[] {
+    if (!elem?.attributes)
+        return [];
+
+    if (Array.isArray(elem.attributes))
+        return elem.attributes;
+
+    return Array.from(elem.attributes);
+}
+
+function isElementNode(node: any) {
+    return node?.nodeType == 1 || (typeof node?.localName == "string" && typeof node?.nodeName == "string");
+}
+
+function getLocalName(node: any) {
+    return node?.localName ?? node?.nodeName?.split?.(":")?.pop?.();
+}

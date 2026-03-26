@@ -22,6 +22,11 @@ export interface Options {
 	renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    virtualizePages: boolean;
+    virtualizePagesOverscan: number;
+    useWorkerParser: boolean;
+    mergeAdjacent: boolean;
+    workerUrl?: string;
     onImageRendered?: (payload: {
         docPrId: string;
         imgEl: HTMLImageElement;
@@ -48,7 +53,11 @@ export const defaultOptions: Options = {
 	useBase64URL: false,
 	renderChanges: false,
     renderComments: false,
-    renderAltChunks: true
+    renderAltChunks: true,
+    virtualizePages: false,
+    virtualizePagesOverscan: 2,
+    useWorkerParser: false,
+    mergeAdjacent: false
 }
 
 export function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<any>  {

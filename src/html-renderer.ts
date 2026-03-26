@@ -23,6 +23,7 @@ import { BaseHeaderFooterPart } from './header-footer/parts';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
+import { VirtualizedRenderer } from './virtualized-renderer';
 
 const ns = {
 	svg: "http://www.w3.org/2000/svg",
@@ -40,6 +41,18 @@ interface Section {
 	pageBreak: boolean;
 }
 
+interface RenderPage {
+	index: number;
+	key: number;
+	sections: Section[];
+	pageProps: SectionProperties;
+	footerProps: SectionProperties;
+	firstOfSection: boolean;
+	initialEndnoteIds: string[];
+	estimatedHeight: number;
+	isLastPage: boolean;
+}
+
 declare const Highlight: any;
 
 type CellVerticalMergeType = Record<number, HTMLTableCellElement>;
@@ -52,6 +65,7 @@ export class HtmlRenderer {
 	options: Options;
 	styleMap: Record<string, IDomStyle> = {};
 	currentPart: Part = null;
+	currentSectionProps: SectionProperties = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
 	currentVerticalMerge: CellVerticalMergeType = null;
@@ -72,6 +86,7 @@ export class HtmlRenderer {
 
 	tasks: Promise<any>[] = [];
 	postRenderTasks: any[] = [];
+	pageVirtualizer: VirtualizedRenderer = null;
 
 	constructor(public htmlDocument: Document) {
 	}
@@ -83,6 +98,16 @@ export class HtmlRenderer {
 		this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
 		this.styleMap = null;
 		this.tasks = [];
+		this.postRenderTasks = [];
+		this.currentTabs = [];
+		this.currentEndnoteIds = [];
+		this.commentMap = {};
+		this.footnoteMap = {};
+		this.endnoteMap = {};
+		this.usedHederFooterParts = [];
+		this.currentSectionProps = null;
+		this.pageVirtualizer?.destroy();
+		this.pageVirtualizer = null;
 
 		if (this.options.renderComments && globalThis.Highlight) {
 			this.commentHighlight = new Highlight();
@@ -131,19 +156,51 @@ export class HtmlRenderer {
 		if (!options.ignoreFonts && document.fontTablePart)
 			this.renderFontTable(document.fontTablePart, styleContainer);
 
-		var sectionElements = this.renderSections(document.documentPart.body);
+		const pages = this.buildPages(document.documentPart.body);
+		const scrollElement = this.resolveVirtualScrollElement(bodyContainer, pages);
+		let bodyHost = bodyContainer;
 
-		if (this.options.inWrapper) {
-			bodyContainer.appendChild(this.renderWrapper(sectionElements));
+		if (scrollElement) {
+			bodyHost = this.options.inWrapper ? this.renderWrapper([]) : this.createElement("div");
+			bodyHost.dataset.docxPageCount = `${pages.length}`;
+			bodyHost.dataset.docxVirtualized = "true";
+
+			if (this.options.inWrapper || bodyHost !== bodyContainer) {
+				bodyContainer.appendChild(bodyHost);
+			}
+
+			this.pageVirtualizer = new VirtualizedRenderer({
+				document: this.htmlDocument,
+				hostElement: bodyHost,
+				scrollElement,
+				items: pages.map(page => ({
+					key: page.key,
+					estimatedSize: page.estimatedHeight
+				})),
+				overscan: this.options.virtualizePagesOverscan,
+				renderItem: index => this.renderPage(pages[index], document.documentPart.body),
+				onRendered: () => {
+					this.flushPostRenderTasks();
+					this.refreshTabStops();
+				}
+			});
+			this.pageVirtualizer.mount();
 		} else {
-			appendChildren(bodyContainer, sectionElements);
+			var sectionElements = pages.map(page => this.renderPage(page, document.documentPart.body));
+			bodyHost.dataset.docxPageCount = `${pages.length}`;
+
+			if (this.options.inWrapper) {
+				bodyContainer.appendChild(this.renderWrapper(sectionElements));
+			} else {
+				appendChildren(bodyContainer, sectionElements);
+			}
 		}
 
 		if (this.commentHighlight && options.renderComments) {
 			(CSS as any).highlights.set(`${this.className}-comments`, this.commentHighlight);
 		}
 
-		this.postRenderTasks.forEach(t => t());
+		this.flushPostRenderTasks();
 
 		await Promise.allSettled(this.tasks);
 
@@ -258,6 +315,7 @@ export class HtmlRenderer {
 					this.processElement(e);
 				}
 			}
+
 		}
 	}
 
@@ -326,48 +384,75 @@ export class HtmlRenderer {
 		return elem;
 	}	
 
-	renderSections(document: DocumentElement): HTMLElement[] {
-		const result = [];
-
+	buildPages(document: DocumentElement): RenderPage[] {
+		const result: RenderPage[] = [];
+		const allEndnoteIds: string[] = [];
 		this.processElement(document);
 		const sections = this.splitBySection(document.children, document.props);
 		const pages = this.groupByPageBreaks(sections);
 		let prevProps = null;
 
-		for (let i = 0, l = pages.length; i < l; i++) {			
-			this.currentFootnoteIds = [];
+		for (let i = 0, l = pages.length; i < l; i++) {
+			const pageSections = pages[i];
+			const pageProps = pageSections[0].sectProps;
+			let footerProps = pageProps;
+			const initialEndnoteIds = allEndnoteIds.slice();
 
-			const section = pages[i][0];
-			let props = section.sectProps;
-			const pageElement = this.createPageElement(this.className, props);
-			this.renderStyleValues(document.cssStyle, pageElement);
-
-			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
-				result.length, prevProps != props, pageElement);
-
-			for (const sect of pages[i]) {
-				var contentElement = this.createSectionContent(sect.sectProps);
-				this.renderElements(sect.elements, contentElement);
-				pageElement.appendChild(contentElement);
-				props = sect.sectProps;
+			for (const sect of pageSections) {
+				this.collectEndnoteIds(sect.elements, allEndnoteIds);
+				footerProps = sect.sectProps;
 			}
 
-			if (this.options.renderFootnotes) {
-				this.renderNotes(this.currentFootnoteIds, this.footnoteMap, pageElement);
-			}
+			result.push({
+				index: i,
+				key: i,
+				sections: pageSections,
+				pageProps,
+				footerProps,
+				firstOfSection: prevProps != pageProps,
+				initialEndnoteIds,
+				estimatedHeight: this.estimatePageHeight(pageProps),
+				isLastPage: i == l - 1
+			});
 
-			if (this.options.renderEndnotes && i == l - 1) {
-				this.renderNotes(this.currentEndnoteIds, this.endnoteMap, pageElement);
-			}
-
-			this.options.renderFooters && this.renderHeaderFooter(props.footerRefs, props,
-				result.length, prevProps != props, pageElement);
-
-			result.push(pageElement);
-			prevProps = props;
+			prevProps = footerProps;
 		}
 
 		return result;
+	}
+
+	renderPage(page: RenderPage, document: DocumentElement): HTMLElement {
+		this.currentFootnoteIds = [];
+		this.currentEndnoteIds = page.initialEndnoteIds.slice();
+
+		const pageElement = this.createPageElement(this.className, page.pageProps);
+		this.renderStyleValues(document.cssStyle, pageElement);
+
+		this.options.renderHeaders && this.renderHeaderFooter(page.pageProps.headerRefs, page.pageProps,
+			page.index, page.firstOfSection, pageElement);
+
+		for (const sect of page.sections) {
+			const contentElement = this.createSectionContent(sect.sectProps);
+			if (this.options.mergeAdjacent) {
+				sect.elements.forEach(element => this.ensureOptimizedTree(element));
+			}
+			this.currentSectionProps = sect.sectProps;
+			this.renderElements(sect.elements, contentElement);
+			pageElement.appendChild(contentElement);
+		}
+
+		if (this.options.renderFootnotes) {
+			this.renderNotes(this.currentFootnoteIds, this.footnoteMap, pageElement);
+		}
+
+		if (this.options.renderEndnotes && page.isLastPage) {
+			this.renderNotes(this.currentEndnoteIds, this.endnoteMap, pageElement);
+		}
+
+		this.options.renderFooters && this.renderHeaderFooter(page.footerProps.footerRefs, page.footerProps,
+			page.index, page.firstOfSection, pageElement);
+
+		return pageElement;
 	}
 
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
@@ -380,10 +465,16 @@ export class HtmlRenderer {
 		var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart) as BaseHeaderFooterPart;
 
 		if (part) {
+			const previousPart = this.currentPart;
+			const previousSectionProps = this.currentSectionProps;
 			this.currentPart = part;
+			this.currentSectionProps = props;
 			if (!this.usedHederFooterParts.includes(part.path)) {
 				this.processElement(part.rootElement);
 				this.usedHederFooterParts.push(part.path);
+			}
+			if (this.options.mergeAdjacent) {
+				this.ensureOptimizedTree(part.rootElement);
 			}
 			const [el] = this.renderElements([part.rootElement], into) as HTMLElement[];
 
@@ -398,7 +489,8 @@ export class HtmlRenderer {
 				}
 			}
 
-			this.currentPart = null;
+			this.currentPart = previousPart;
+			this.currentSectionProps = previousSectionProps;
 		}
 	}
 
@@ -711,6 +803,12 @@ section.${c}>footer { z-index: 1; }
 		var notes = noteIds.map(id => notesMap[id]).filter(x => x);
 
 		if (notes.length > 0) {
+			notes.forEach(note => {
+				this.processElement(note);
+				if (this.options.mergeAdjacent) {
+					this.ensureOptimizedTree(note);
+				}
+			});
 			var result = this.createElement("ol", null, this.renderElements(notes));
 			into.appendChild(result);
 		}
@@ -1032,12 +1130,32 @@ section.${c}>footer { z-index: 1; }
 
 	renderDrawing(elem: OpenXmlElement) {
 		var result = this.renderContainer(elem, "div");
+		const anchor = elem.props?.drawingAnchor;
+		const pageMargins = this.currentSectionProps?.pageMargins;
+		const isPageRelativeAnchor = anchor?.wrapType == "wrapNone"
+			&& pageMargins
+			&& (anchor?.posX?.relative == "page" || anchor?.posY?.relative == "page");
 
 		result.style.display = "inline-block";
-		result.style.position = "relative";
 		result.style.textIndent = "0px";
 
 		this.renderStyleValues(elem.cssStyle, result);
+
+		if (isPageRelativeAnchor) {
+			result.style.display = "block";
+			result.style.position = "absolute";
+
+			if (anchor.posX?.relative == "page" && anchor.posX.offset) {
+				result.style.left = `calc(${anchor.posX.offset} - ${pageMargins.left ?? "0px"})`;
+			}
+
+			if (anchor.posY?.relative == "page" && anchor.posY.offset) {
+				result.style.top = `calc(${anchor.posY.offset} - ${pageMargins.top ?? "0px"})`;
+			}
+		}
+		else if (!result.style.position) {
+			result.style.position = "relative";
+		}
 
 		return result;
 	}
@@ -1414,6 +1532,9 @@ section.${c}>footer { z-index: 1; }
 
 
 	renderStyleValues(style: Record<string, string>, ouput: HTMLElement) {
+		if (!style)
+			return;
+
 		for (let k in style) {
 			if (k.startsWith("$")) {
 				ouput.setAttribute(k.slice(1), style[k]);
@@ -1562,6 +1683,104 @@ section.${c}>footer { z-index: 1; }
 	later(func: Function) { 
 		this.postRenderTasks.push(func);
 	}
+
+	flushPostRenderTasks(fromIndex: number = 0) {
+		if (fromIndex >= this.postRenderTasks.length)
+			return;
+
+		const tasks = this.postRenderTasks.splice(fromIndex);
+		tasks.forEach(task => task());
+	}
+
+	resolveVirtualScrollElement(bodyContainer: HTMLElement, pages: RenderPage[]): HTMLElement {
+		if (!this.options.virtualizePages || pages.length < 2 || this.options.renderComments)
+			return null;
+
+		return findScrollableElement(bodyContainer, this.htmlDocument);
+	}
+
+	collectEndnoteIds(elements: OpenXmlElement[], output: string[]) {
+		if (!elements)
+			return;
+
+		for (const element of elements) {
+			if (element.type == DomType.EndnoteReference) {
+				output.push((element as WmlNoteReference).id);
+			}
+
+			if (element.children?.length) {
+				this.collectEndnoteIds(element.children, output);
+			}
+		}
+	}
+
+	estimatePageHeight(props: SectionProperties) {
+		const defaultPageHeight = 1122;
+		const pageHeight = parseSizeToPixels(props?.pageSize?.height) ?? defaultPageHeight;
+		return pageHeight + (this.options.inWrapper ? 30 : 0);
+	}
+
+	optimizeChildren(children: OpenXmlElement[]) {
+		const result: OpenXmlElement[] = [];
+
+		for (const child of children) {
+			const previous = result[result.length - 1];
+
+			if (this.canMergeRuns(previous as WmlRun, child as WmlRun)) {
+				for (const grandChild of child.children ?? []) {
+					grandChild.parent = previous as WmlRun;
+					(previous as WmlRun).children.push(grandChild);
+				}
+				continue;
+			}
+
+			if (this.canMergeText(previous as WmlText, child as WmlText)) {
+				(previous as WmlText).text += (child as WmlText).text;
+				continue;
+			}
+
+			result.push(child);
+		}
+
+		return result;
+	}
+
+	ensureOptimizedTree(element: OpenXmlElement) {
+		if ((element as any).__optimizedRuns)
+			return;
+
+		if (element.children?.length) {
+			element.children.forEach(child => this.ensureOptimizedTree(child));
+			element.children = this.optimizeChildren(element.children);
+			element.children.forEach(child => child.parent = element);
+		}
+
+		(element as any).__optimizedRuns = true;
+	}
+
+	canMergeRuns(left: WmlRun, right: WmlRun) {
+		if (!left || !right || left.type != DomType.Run || right.type != DomType.Run)
+			return false;
+
+		if (left.fieldRun || right.fieldRun || left.id || right.id)
+			return false;
+
+		if (left.verticalAlign != right.verticalAlign || left.className != right.className || left.styleName != right.styleName)
+			return false;
+
+		if (!sameStyleMap(left.cssStyle, right.cssStyle))
+			return false;
+
+		return this.hasSimpleInlineChildren(left) && this.hasSimpleInlineChildren(right);
+	}
+
+	canMergeText(left: WmlText, right: WmlText) {
+		return left?.type == DomType.Text && right?.type == DomType.Text;
+	}
+
+	hasSimpleInlineChildren(run: WmlRun) {
+		return (run.children ?? []).every(child => simpleInlineChildTypes.has(child.type));
+	}
 }
 
 type ChildType = Node | string;
@@ -1581,4 +1800,67 @@ function findParent<T extends OpenXmlElement>(elem: OpenXmlElement, type: DomTyp
 		parent = parent.parent;
 
 	return <T>parent;
+}
+
+function findScrollableElement(elem: HTMLElement, htmlDocument: Document): HTMLElement {
+	const defaultView = htmlDocument.defaultView;
+	let current: HTMLElement = elem;
+
+	while (current) {
+		const style = defaultView?.getComputedStyle(current);
+		const overflowY = style?.overflowY ?? '';
+		const overflow = style?.overflow ?? '';
+
+		if (/(auto|scroll|overlay)/.test(`${overflowY} ${overflow}`)) {
+			return current;
+		}
+
+		current = current.parentElement;
+	}
+
+	return null;
+}
+
+function parseSizeToPixels(value: string): number {
+	if (!value)
+		return null;
+
+	const match = /^(-?\d*\.?\d+)(px|pt|pc|in|cm|mm|q)?$/i.exec(value.trim());
+
+	if (!match)
+		return null;
+
+	const amount = parseFloat(match[1]);
+	const unit = (match[2] ?? "px").toLowerCase();
+
+	switch (unit) {
+		case "pt": return amount * 96 / 72;
+		case "pc": return amount * 16;
+		case "in": return amount * 96;
+		case "cm": return amount * 96 / 2.54;
+		case "mm": return amount * 96 / 25.4;
+		case "q": return amount * 96 / 101.6;
+		default: return amount;
+	}
+}
+
+const simpleInlineChildTypes = new Set([
+	DomType.Text,
+	DomType.DeletedText,
+	DomType.Break,
+	DomType.Tab,
+	DomType.NoBreakHyphen,
+	DomType.Symbol,
+	DomType.FootnoteReference,
+	DomType.EndnoteReference,
+]);
+
+function sameStyleMap(left: Record<string, string>, right: Record<string, string>) {
+	const leftKeys = Object.keys(left ?? {});
+	const rightKeys = Object.keys(right ?? {});
+
+	if (leftKeys.length != rightKeys.length)
+		return false;
+
+	return leftKeys.every(key => left[key] == right[key]);
 }

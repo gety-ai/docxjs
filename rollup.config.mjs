@@ -1,5 +1,8 @@
 import typescript from '@rollup/plugin-typescript';
 import terser from '@rollup/plugin-terser';
+import commonjs from '@rollup/plugin-commonjs';
+import nodeResolve from '@rollup/plugin-node-resolve';
+import replace from '@rollup/plugin-replace';
 
 const output = {
 	banner: `/*
@@ -16,20 +19,42 @@ const umdOutput = {
 	name: "docx",
 	file: 'dist/docx-preview.js',
 	format: 'umd',
-	globals: {
-		jszip: 'JSZip'
-	},
 };
 
+const workerOutput = {
+	...output,
+	name: "docxWorker",
+	file: 'dist/docx-preview-worker.js',
+	format: 'iife',
+};
+
+function createPlugins() {
+	return [
+		replace({
+			preventAssignment: true,
+			'process.env.NODE_ENV': JSON.stringify('production')
+		}),
+		nodeResolve(),
+		commonjs(),
+		typescript()
+	];
+}
+
 export default args => {
-	const config = {
+	const mainConfig = {
 		input: 'src/docx-preview.ts',
 		output: [umdOutput],
-		plugins: [typescript()]
+		plugins: createPlugins()
+	}
+
+	const workerConfig = {
+		input: 'src/parser-worker.ts',
+		output: [workerOutput],
+		plugins: createPlugins()
 	}
 
 	if (args.environment == 'BUILD:production')
-		config.output = [umdOutput,
+		mainConfig.output = [umdOutput,
 			{
 				...umdOutput,
 				file: 'dist/docx-preview.min.js',
@@ -47,5 +72,5 @@ export default args => {
 				plugins: [terser()]
 			}];
 
-	return config
+	return [mainConfig, workerConfig]
 };

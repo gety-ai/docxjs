@@ -4,5 +4,6 @@ bin
 obj
 docx.js.map
 /*.json
+!/tsconfig.types.json
 /*.config
 *.log

@@ -939,6 +939,17 @@ export class DocumentParser {
 			result.cssStyle["float"] = posX.align;
 		}
 
+		result.props = {
+			...result.props,
+			drawingAnchor: {
+				isAnchor,
+				wrapType,
+				behindDoc,
+				posX: { ...posX },
+				posY: { ...posY }
+			}
+		};
+
 		return result;
 	}
 
