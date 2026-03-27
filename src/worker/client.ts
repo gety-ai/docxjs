@@ -37,9 +37,9 @@ export async function parseDocumentInWorker(data: Blob | ArrayBuffer | Uint8Arra
     });
 }
 
-function resolveWorkerUrl(explicitUrl?: string) {
+function resolveWorkerUrl(explicitUrl?: string | URL) {
     if (explicitUrl)
-        return explicitUrl;
+        return explicitUrl instanceof URL ? explicitUrl.href : explicitUrl.toString();
 
     if (typeof document === "undefined")
         return null;

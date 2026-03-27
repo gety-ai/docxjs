@@ -2261,7 +2261,7 @@
     }
     function resolveWorkerUrl(explicitUrl) {
         if (explicitUrl)
-            return explicitUrl;
+            return explicitUrl instanceof URL ? explicitUrl.href : explicitUrl.toString();
         if (typeof document === "undefined")
             return null;
         const scripts = Array.from(document.scripts ?? []).reverse();

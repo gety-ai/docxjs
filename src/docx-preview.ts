@@ -26,7 +26,7 @@ export interface Options {
     virtualizePagesOverscan: number;
     useWorkerParser: boolean;
     mergeAdjacent: boolean;
-    workerUrl?: string;
+    workerUrl?: string | URL;
     onImageRendered?: (payload: {
         docPrId: string;
         imgEl: HTMLImageElement;

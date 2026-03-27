@@ -20,8 +20,6 @@ npm install docx-preview
 Usage
 -----
 ```html
-<!--lib uses jszip-->
-<script src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
 <script src="docx-preview.min.js"></script>
 <script>
     var docData = <document Blob>;
@@ -40,7 +38,7 @@ API
 ```ts
 // renders document into specified element
 renderAsync(
-    document: Blob | ArrayBuffer | Uint8Array, // could be any type that supported by JSZip.loadAsync
+    document: Blob | ArrayBuffer | Uint8Array, //could be Blob, ArrayBuffer or Uint8Array
     bodyContainer: HTMLElement, //element to render document content,
     styleContainer: HTMLElement, //element to render document styles, numbeings, fonts. If null, bodyContainer will be used.
     options: {
@@ -62,6 +60,11 @@ renderAsync(
         renderEndnotes: true, //enables endnotes rendering
         renderComments: false, //enables experimental comments rendering
         renderAltChunks: true, //enables altChunks (html parts) rendering
+        virtualizePages: false, //renders only visible pages for large multi-page documents
+        virtualizePagesOverscan: 2, //how many extra pages stay mounted above/below viewport
+        useWorkerParser: false, //moves unzip + XML parsing into a worker when available
+        mergeAdjacent: false, //merges adjacent text runs with identical formatting
+        workerUrl: string | URL, //explicit worker script URL for bundlers
         debug: boolean = false, //enables additional logging
     }): Promise<WordDocument>
 
@@ -82,6 +85,35 @@ renderDocument(
     styleContainer: HTMLElement,
     options: Options
 ): Promise<void>
+```
+
+Vite / bundlers
+-----
+When `useWorkerParser` is enabled, automatic worker discovery only works for script-tag builds. In bundlers, pass a concrete `workerUrl`.
+
+For Vite, you can point `workerUrl` at the worker file shipped in this package:
+
+```ts
+import * as docx from "docx-preview";
+
+await docx.renderAsync(file, container, undefined, {
+    useWorkerParser: true,
+    workerUrl: new URL(
+        "docx-preview/dist/docx-preview-worker.js",
+        import.meta.url
+    ).toString()
+});
+```
+
+If your bundler setup does not resolve package asset URLs this way, copy `node_modules/docx-preview/dist/docx-preview-worker.js` into your app's public assets and point `workerUrl` at that file instead:
+
+```ts
+import * as docx from "docx-preview";
+
+await docx.renderAsync(file, container, undefined, {
+    useWorkerParser: true,
+    workerUrl: "/docx-preview-worker.js"
+});
 ```
 
 Thumbnails, TOC and etc.

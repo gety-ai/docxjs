@@ -101,6 +101,27 @@ describe("Render document", function () {
     div.remove();
   });
 
+  it("worker parser should accept URL objects", async () => {
+    const path = 'header-footer';
+    const docBlob = await fetch(`/base/tests/render-test/${path}/document.docx`).then(r => r.blob());
+    const resultText = await fetch(`/base/tests/render-test/${path}/result.html`).then(r => r.text());
+    const div = document.createElement("div");
+
+    document.body.appendChild(div);
+
+    await docx.renderAsync(docBlob, div, null, {
+      useWorkerParser: true,
+      workerUrl: new URL("/base/dist/docx-preview-worker.js", window.location.href)
+    });
+
+    const actual = formatHTML(div.innerHTML);
+    const expected = formatHTML(resultText);
+
+    expect(actual).toBe(expected);
+
+    div.remove();
+  });
+
   it("mergeAdjacent should preserve text content while reducing wrapper spans", async () => {
     const path = 'header-footer';
     const docBlob = await fetch(`/base/tests/render-test/${path}/document.docx`).then(r => r.blob());
