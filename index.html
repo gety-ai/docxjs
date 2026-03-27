@@ -180,7 +180,7 @@
 
                 try {
                     // optional, find and convert all tiff images
-                    let docxBlob = preprocessTiff(currentDocument);
+                    let docxBlob = await preprocessTiff(currentDocument);
                     setLoadingState(true, "Parsing and rendering...");
                     let res = await docx.renderAsync(
                         docxBlob,

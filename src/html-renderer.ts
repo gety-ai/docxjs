@@ -13,7 +13,7 @@ import { WmlParagraph } from './document/paragraph';
 import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
-import { FooterHeaderReference, SectionProperties } from './document/section';
+import { FooterHeaderReference, SectionProperties, SectionType } from './document/section';
 import { WmlRun, RunProperties } from './document/run';
 import { WmlBookmarkStart } from './document/bookmarks';
 import { IDomStyle } from './document/style';
@@ -437,7 +437,7 @@ export class HtmlRenderer {
 				sect.elements.forEach(element => this.ensureOptimizedTree(element));
 			}
 			this.currentSectionProps = sect.sectProps;
-			this.renderElements(sect.elements, contentElement);
+			this.renderSectionElements(sect, contentElement);
 			pageElement.appendChild(contentElement);
 		}
 
@@ -521,8 +521,7 @@ export class HtmlRenderer {
 			if (elem.type == DomType.Paragraph) {
 				const s = this.findStyle((elem as WmlParagraph).styleName);
 
-				if (s?.paragraphProps?.pageBreakBefore) {
-					current.sectProps = sectProps;
+				if (s?.paragraphProps?.pageBreakBefore && current.elements.length > 0) {
 					current.pageBreak = true;
 					current = { sectProps: null, elements: [], pageBreak: false };
 					result.push(current);
@@ -583,7 +582,105 @@ export class HtmlRenderer {
 			}
 		}
 
+		return this.coalesceEmptySections(this.resolveSectionProps(result));
+	}
+
+	resolveSectionProps(sections: Section[]) {
+		let previous: SectionProperties = null;
+
+		for (const section of sections) {
+			if (previous) {
+				section.sectProps = this.mergeSectionProps(previous, section.sectProps);
+			}
+
+			previous = section.sectProps;
+		}
+
+		return sections;
+	}
+
+	mergeSectionProps(base: SectionProperties, override: SectionProperties): SectionProperties {
+		if (!base)
+			return override;
+
+		if (!override)
+			return base;
+
+		if (base === override)
+			return base;
+
+		return {
+			...base,
+			...override,
+			type: override.type ?? base.type,
+			pageSize: override.pageSize ?? base.pageSize,
+			pageMargins: override.pageMargins ?? base.pageMargins,
+			pageBorders: override.pageBorders ?? base.pageBorders,
+			pageNumber: override.pageNumber ?? base.pageNumber,
+			columns: override.columns,
+			footerRefs: override.footerRefs ?? base.footerRefs,
+			headerRefs: override.headerRefs ?? base.headerRefs,
+			titlePage: override.titlePage ?? base.titlePage,
+		};
+	}
+
+	coalesceEmptySections(sections: Section[]) {
+		const result: Section[] = [];
+
+		for (let i = 0; i < sections.length; i++) {
+			const section = sections[i];
+			const next = sections[i + 1];
+
+			if (next && !section.pageBreak && !this.sectionHasVisibleContent(section) && !this.sectionForcesStandalonePage(section)) {
+				next.elements = [...section.elements, ...next.elements];
+				next.sectProps = this.mergeSectionProps(section.sectProps, next.sectProps);
+				next.pageBreak = section.pageBreak || next.pageBreak;
+				continue;
+			}
+
+			result.push(section);
+		}
+
 		return result;
+	}
+
+	sectionForcesStandalonePage(section: Section) {
+		switch (section.sectProps?.type) {
+			case SectionType.EvenPage:
+			case SectionType.OddPage:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	sectionHasVisibleContent(section: Section) {
+		return section.elements?.some(element => this.elementHasVisibleContent(element)) ?? false;
+	}
+
+	elementHasVisibleContent(element: OpenXmlElement) {
+		if (!element)
+			return false;
+
+		switch (element.type) {
+			case DomType.Text:
+			case DomType.DeletedText:
+				return !!(element as WmlText).text?.trim();
+
+			case DomType.Image:
+			case DomType.Drawing:
+			case DomType.Table:
+			case DomType.Symbol:
+			case DomType.Tab:
+			case DomType.NoBreakHyphen:
+			case DomType.FootnoteReference:
+			case DomType.EndnoteReference:
+			case DomType.CommentReference:
+			case DomType.AltChunk:
+				return true;
+		}
+
+		return element.children?.some(child => this.elementHasVisibleContent(child)) ?? false;
 	}
 
 	groupByPageBreaks(sections: Section[]): Section[][] {
@@ -1001,6 +1098,10 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderParagraph(elem: WmlParagraph) {
+		if (elem.sectionProps && !this.elementHasVisibleContent(elem)) {
+			return null;
+		}
+
 		var result = this.renderContainer(elem, "p");
 
 		const style = this.findStyle(elem.styleName);
@@ -1015,6 +1116,8 @@ section.${c}>footer { z-index: 1; }
 		if (numbering) {
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
 		}
+
+		this.normalizeRenderedDrawingParagraph(result);
 
 		return result;
 	}
@@ -1204,11 +1307,190 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderBreak(elem: WmlBreak) {
+		if (elem.break == "column") {
+			const result = this.createElement("span");
+			result.style.display = "block";
+			result.style.height = "0";
+			result.style.breakAfter = "column";
+			return result;
+		}
+
 		if (elem.break == "textWrapping") {
 			return this.createElement("br");
 		}
 
 		return null;
+	}
+
+	renderSectionElements(section: Section, contentElement: HTMLElement) {
+		if (this.shouldRenderManualColumns(section)) {
+			this.renderManualColumns(section, contentElement);
+			return;
+		}
+
+		this.renderElements(section.elements, contentElement);
+	}
+
+	shouldRenderManualColumns(section: Section) {
+		const columns = section.sectProps?.columns;
+
+		if (!columns || columns.numberOfColumns <= 1 || columns.equalWidth)
+			return false;
+
+		if (!columns.columns?.length || columns.columns.length < columns.numberOfColumns)
+			return false;
+
+		return this.hasColumnBreak(section.elements);
+	}
+
+	hasColumnBreak(elements: OpenXmlElement[]) {
+		return elements?.some(element => this.elementHasBreak(element, "column")) ?? false;
+	}
+
+	elementHasBreak(element: OpenXmlElement, type: WmlBreak["break"]) {
+		if (!element)
+			return false;
+
+		if (element.type == DomType.Break) {
+			return (element as WmlBreak).break == type;
+		}
+
+		return element.children?.some(child => this.elementHasBreak(child, type)) ?? false;
+	}
+
+	renderManualColumns(section: Section, contentElement: HTMLElement) {
+		const columns = section.sectProps.columns;
+		const groups = this.splitSectionByColumnBreaks(section.elements);
+		const columnCount = Math.max(columns.numberOfColumns, groups.length);
+
+		contentElement.style.columnCount = "";
+		contentElement.style.columnGap = "";
+		contentElement.style.columnRule = "";
+		contentElement.style.display = "flex";
+		contentElement.style.alignItems = "flex-start";
+		contentElement.style.gap = columns.space ?? "0";
+
+		for (let i = 0; i < columnCount; i++) {
+			const column = this.createElement("div");
+			const columnProps = columns.columns?.[i];
+
+			column.style.boxSizing = "border-box";
+			column.style.minWidth = "0";
+			column.style.flex = "0 0 auto";
+			column.style.width = columnProps?.width ?? this.getEqualColumnWidth(columns);
+
+			if (!columnProps?.width) {
+				column.style.flex = "1 1 0";
+			}
+
+			if (columns.separator && i > 0) {
+				column.style.borderLeft = "1px solid black";
+				column.style.paddingLeft = columns.space ?? "0";
+			}
+
+			this.renderElements(groups[i] ?? [], column);
+			contentElement.appendChild(column);
+		}
+	}
+
+	getEqualColumnWidth(columns: SectionProperties["columns"]) {
+		const count = Math.max(columns?.numberOfColumns ?? 1, 1);
+		return `calc((100% - (${columns?.space ?? "0"} * ${count - 1})) / ${count})`;
+	}
+
+	splitSectionByColumnBreaks(elements: OpenXmlElement[]) {
+		const result: OpenXmlElement[][] = [[]];
+		let current = result[0];
+
+		for (const element of elements) {
+			const fragments = this.splitElementByColumnBreaks(element);
+
+			for (let i = 0; i < fragments.length; i++) {
+				current.push(...fragments[i]);
+
+				if (i < fragments.length - 1) {
+					current = [];
+					result.push(current);
+				}
+			}
+		}
+
+		return result;
+	}
+
+	splitElementByColumnBreaks(element: OpenXmlElement): OpenXmlElement[][] {
+		if (element?.type != DomType.Paragraph || !element.children?.length) {
+			return [[element]];
+		}
+
+		const fragments = this.splitParagraphChildrenByColumnBreaks(element.children);
+
+		if (fragments.length == 1) {
+			return [[element]];
+		}
+
+		return fragments.map(children => {
+			if (!children.length)
+				return [];
+
+			return [{ ...element, children }];
+		});
+	}
+
+	splitParagraphChildrenByColumnBreaks(children: OpenXmlElement[]) {
+		const result: OpenXmlElement[][] = [[]];
+		let current = result[0];
+
+		for (const child of children) {
+			const fragments = this.splitChildByColumnBreaks(child);
+
+			for (let i = 0; i < fragments.length; i++) {
+				const fragment = fragments[i];
+
+				if (fragment) {
+					current.push(fragment);
+				}
+
+				if (i < fragments.length - 1) {
+					current = [];
+					result.push(current);
+				}
+			}
+		}
+
+		return result;
+	}
+
+	splitChildByColumnBreaks(child: OpenXmlElement): (OpenXmlElement | null)[] {
+		if (!child?.children?.length) {
+			return [child];
+		}
+
+		const result: (OpenXmlElement | null)[] = [];
+		let current: OpenXmlElement[] = [];
+		let hasBreak = false;
+
+		for (const nestedChild of child.children) {
+			if (this.isColumnBreakElement(nestedChild)) {
+				result.push(current.length ? { ...child, children: current } : null);
+				current = [];
+				hasBreak = true;
+				continue;
+			}
+
+			current.push(nestedChild);
+		}
+
+		if (!hasBreak) {
+			return [child];
+		}
+
+		result.push(current.length ? { ...child, children: current } : null);
+		return result;
+	}
+
+	isColumnBreakElement(elem: OpenXmlElement) {
+		return elem?.type == DomType.Break && (elem as WmlBreak).break == "column";
 	}
 
 	renderInserted(elem: OpenXmlElement): Node | Node[] {
@@ -1269,12 +1551,22 @@ section.${c}>footer { z-index: 1; }
 			return null;
 
 		const result = this.createElement("span");
+		const style = elem.cssStyle ? { ...elem.cssStyle } : null;
+		const drawingOnlyOffset = this.extractDrawingOnlyRunOffset(style, elem);
 
 		if (elem.id)
 			result.id = elem.id;
 
 		this.renderClass(elem, result);
-		this.renderStyleValues(elem.cssStyle, result);
+		this.renderStyleValues(style, result);
+
+		if (drawingOnlyOffset) {
+			result.style.display = "inline-block";
+			result.style.lineHeight = "0";
+			result.style.position = "relative";
+			result.style.top = drawingOnlyOffset;
+			result.style.verticalAlign = "top";
+		}
 
 		if (elem.verticalAlign) {
 			const wrapper = this.createElement(elem.verticalAlign as any);
@@ -1286,6 +1578,53 @@ section.${c}>footer { z-index: 1; }
 		}
 
 		return result;
+	}
+
+	extractDrawingOnlyRunOffset(style: Record<string, string>, elem: WmlRun) {
+		const verticalAlign = style?.["vertical-align"];
+
+		if (!verticalAlign || !this.isDrawingOnlyRun(elem) || !/^[-\d.]+(?:pt|px)$/.test(verticalAlign)) {
+			return null;
+		}
+
+		delete style["vertical-align"];
+		return verticalAlign;
+	}
+
+	isDrawingOnlyRun(elem: WmlRun) {
+		if (!elem.children?.length) {
+			return false;
+		}
+
+		return elem.children.every(child => this.isDrawingOnlyInlineElement(child));
+	}
+
+	isDrawingOnlyInlineElement(elem: OpenXmlElement) {
+		switch (elem?.type) {
+			case DomType.Drawing:
+			case DomType.Image:
+				return true;
+			case DomType.Run:
+			case DomType.Hyperlink:
+			case DomType.SmartTag:
+				return elem.children?.every(child => this.isDrawingOnlyInlineElement(child)) ?? false;
+			default:
+				return false;
+		}
+	}
+
+	normalizeRenderedDrawingParagraph(paragraph: HTMLParagraphElement) {
+		if (!paragraph || paragraph.childElementCount != 1 || paragraph.textContent?.trim()) {
+			return;
+		}
+
+		if (!paragraph.querySelector("img, svg")) {
+			return;
+		}
+
+		paragraph.style.lineHeight = "0";
+		paragraph.style.minHeight = "0";
+		paragraph.style.fontSize = "0";
 	}
 
 	renderTable(elem: WmlTable) {

@@ -7,3 +7,6 @@ docx.js.map
 !/tsconfig.types.json
 /*.config
 *.log
+perf-results/
+scripts/compare-optimize-runs.mjs
+scripts/inspect-title-page.mjs
