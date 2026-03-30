@@ -1,38 +1,7 @@
-export interface Options {
-    inWrapper: boolean;
-    hideWrapperOnPrint: boolean;
-    ignoreWidth: boolean;
-    ignoreHeight: boolean;
-    ignoreFonts: boolean;
-    breakPages: boolean;
-    debug: boolean;
-    experimental: boolean;
-    className: string;
-    trimXmlDeclaration: boolean;
-    renderHeaders: boolean;
-    renderFooters: boolean;
-    renderFootnotes: boolean;
-    renderEndnotes: boolean;
-    ignoreLastRenderedPageBreak: boolean;
-    useBase64URL: boolean;
-    renderChanges: boolean;
-    renderComments: boolean;
-    renderAltChunks: boolean;
-    virtualizePages: boolean;
-    virtualizePagesOverscan: number;
-    useWorkerParser: boolean;
-    mergeAdjacent: boolean;
-    workerUrl?: string | URL;
-    onImageRendered?: (payload: {
-        docPrId: string;
-        imgEl: HTMLImageElement;
-        naturalSize: {
-            width: number;
-            height: number;
-        };
-    }) => void;
-}
-export declare const defaultOptions: Options;
+import { Options } from './options';
+export { defaultOptions } from './options';
+export type { Options } from './options';
+export { parseToSnapshot, collectSnapshotTransferables, renderSnapshot, type DocxSnapshot, type DocxSnapshotMeta, type DocxSnapshotPage, type DocxSnapshotSection, type ParseOptions, type RenderOptions, type RenderedSnapshot, type SnapshotFile } from './snapshot';
 export declare function parseAsync(data: Blob | any, userOptions?: Partial<Options>): Promise<any>;
 export declare function renderDocument(document: any, bodyContainer: HTMLElement, styleContainer?: HTMLElement, userOptions?: Partial<Options>): Promise<any>;
 export declare function renderAsync(data: Blob | any, bodyContainer: HTMLElement, styleContainer?: HTMLElement, userOptions?: Partial<Options>): Promise<any>;

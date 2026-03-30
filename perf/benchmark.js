@@ -76,6 +76,7 @@
   async function runBench(options) {
     const docxOptions = options.docxOptions || {};
     const className = docxOptions.className || "docx";
+    const mode = options.mode || "render";
     const longTasks = [];
     const observer = "PerformanceObserver" in window
       ? new PerformanceObserver(list => {
@@ -98,11 +99,113 @@
     const response = await fetch("/api/test-docx");
     const blob = await response.blob();
 
+    if (mode === "snapshot-worker") {
+      setStatus("Parsing in snapshot worker...");
+      const totalStart = performance.now();
+      const workerResult = await runSnapshotWorker(blob, options.parseOptions || docxOptions);
+
+      setStatus("Rendering snapshot...");
+      const renderStart = performance.now();
+      const handle = await window.docx.renderSnapshot(
+        workerResult.snapshot,
+        rootEl,
+        stylesEl,
+        options.renderOptions || docxOptions
+      );
+      const renderMs = performance.now() - renderStart;
+
+      await nextFrame();
+      await nextFrame();
+
+      const totalMs = performance.now() - totalStart;
+      const elements = rootEl.querySelectorAll("*").length;
+      const mountedPages = rootEl.querySelectorAll(`section.${className}`).length;
+      const pages = countTotalPages(className);
+      const textNodes = countTextNodes(rootEl);
+      const visiblePages = countVisiblePages(className);
+
+      setStatus("Auto-scrolling...");
+      const scrollStart = performance.now();
+      const scrollPass = await runScrollPass(className);
+      const scrollPassMs = performance.now() - scrollStart;
+
+      observer?.disconnect();
+
+      const memory = typeof performance.measureUserAgentSpecificMemory === "function"
+        ? await performance.measureUserAgentSpecificMemory().catch(() => null)
+        : null;
+
+      const result = {
+        label: options.label || "snapshot-worker",
+        mode,
+        parseOptions: options.parseOptions || docxOptions,
+        renderOptions: options.renderOptions || docxOptions,
+        parseMs: workerResult.parseMs,
+        parseRoundtripMs: workerResult.parseRoundtripMs,
+        transferMs: workerResult.transferMs,
+        workerRoundtripMs: workerResult.workerRoundtripMs,
+        renderMs,
+        totalMs,
+        elements,
+        textNodes,
+        pages,
+        mountedPages,
+        visiblePages,
+        longTasks: {
+          count: longTasks.length,
+          sumMs: longTasks.reduce((sum, value) => sum + value, 0),
+          maxMs: longTasks.length ? Math.max.apply(null, longTasks) : 0
+        },
+        scrollPassMs,
+        scrollPeakElements: scrollPass.peakElements,
+        visiblePagesAfterScroll: scrollPass.visiblePagesAfterScroll,
+        snapshotPageCount: workerResult.snapshot.meta?.pageCount ?? 0,
+        snapshotResourceFiles: workerResult.snapshot.files?.length ?? 0,
+        memoryBytes: memory?.bytes ?? null
+      };
+
+      handle?.destroy?.();
+
+      setStatus(JSON.stringify(result, null, 2));
+      window.__DOCX_BENCH_RESULT__ = result;
+      return result;
+    }
+
     setStatus("Parsing...");
     const totalStart = performance.now();
     const parseStart = performance.now();
     const doc = await window.docx.parseAsync(blob, docxOptions);
     const parseMs = performance.now() - parseStart;
+
+    if (mode === "parse-only") {
+      await nextFrame();
+      await nextFrame();
+
+      observer?.disconnect();
+
+      const result = {
+        label: options.label || "parse-only",
+        mode,
+        options: docxOptions,
+        parseMs,
+        totalMs: performance.now() - totalStart,
+        parts: doc.parts?.length ?? 0,
+        rels: doc.rels?.length ?? 0,
+        longTasks: {
+          count: longTasks.length,
+          sumMs: longTasks.reduce((sum, value) => sum + value, 0),
+          maxMs: longTasks.length ? Math.max.apply(null, longTasks) : 0
+        }
+      };
+
+      if (typeof doc?.dispose === "function") {
+        await doc.dispose();
+      }
+
+      setStatus(JSON.stringify(result, null, 2));
+      window.__DOCX_BENCH_RESULT__ = result;
+      return result;
+    }
 
     setStatus("Rendering...");
     const renderStart = performance.now();
@@ -152,6 +255,10 @@
       memoryBytes: memory?.bytes ?? null
     };
 
+    if (typeof doc?.dispose === "function") {
+      await doc.dispose();
+    }
+
     setStatus(JSON.stringify(result, null, 2));
     window.__DOCX_BENCH_RESULT__ = result;
     return result;
@@ -169,4 +276,64 @@
       throw error;
     }
   };
+
+  function runSnapshotWorker(blob, parseOptions) {
+    const requestId = Date.now();
+    const worker = new Worker("/perf/snapshot-worker.js");
+
+    return blob.arrayBuffer().then(buffer => new Promise((resolve, reject) => {
+      const parseStart = performance.now();
+      let transferStart = 0;
+      let workerParseMs = 0;
+
+      worker.onmessage = event => {
+        const message = event.data;
+
+        if (!message || message.requestId !== requestId) {
+          return;
+        }
+
+        if (message.type === "snapshot-error") {
+          worker.terminate();
+          reject(new Error(message.error || "Snapshot worker failed"));
+          return;
+        }
+
+        if (message.type === "snapshot-ready") {
+          workerParseMs = message.parseMs;
+          transferStart = performance.now();
+          worker.postMessage({
+            type: "snapshot-transfer",
+            requestId
+          });
+          return;
+        }
+
+        if (message.type === "snapshot-parsed") {
+          const receiveAt = performance.now();
+          worker.terminate();
+
+          resolve({
+            parseMs: workerParseMs,
+            parseRoundtripMs: transferStart ? transferStart - parseStart : 0,
+            transferMs: transferStart ? receiveAt - transferStart : 0,
+            workerRoundtripMs: receiveAt - parseStart,
+            snapshot: message.snapshot
+          });
+        }
+      };
+
+      worker.onerror = event => {
+        worker.terminate();
+        reject(event.error || new Error(event.message || "Snapshot worker failed"));
+      };
+
+      worker.postMessage({
+        type: "snapshot-parse",
+        requestId,
+        parseOptions,
+        buffer
+      }, [buffer]);
+    }));
+  }
 })();

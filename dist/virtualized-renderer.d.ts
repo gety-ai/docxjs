@@ -26,5 +26,14 @@ export declare class VirtualizedRenderer {
     private createSpacer;
     private scheduleSync;
     private sync;
+    getMountedItems(): {
+        index: number;
+        element: HTMLElement;
+    }[];
+    findMountedItem(index: number): HTMLElement;
+    scrollToIndex(index: number, options?: {
+        block?: ScrollLogicalPosition;
+        behavior?: ScrollBehavior;
+    }): void;
 }
 export {};

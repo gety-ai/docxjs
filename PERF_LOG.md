@@ -8,6 +8,7 @@ Primary browser:
 
 Metrics captured per run:
 - `parseMs`: `docx.parseAsync(...)`
+- `transferMs`: dedicated worker-to-main snapshot transfer time
 - `renderMs`: `docx.renderDocument(...)`
 - `totalMs`: parse + render + 2 animation frames
 - `elements`: rendered element count inside benchmark root
@@ -177,3 +178,126 @@ Delta vs virtualized + worker:
 Notes:
 - The previous lower DOM counts came from an over-aggressive run inlining path that broke font styling and drawing layout. That path has been removed.
 - The current safe run compaction still reduces mounted DOM materially, but it is no longer a first-order performance win compared with virtualization + worker parsing.
+
+## Worker Handoff
+
+Date:
+`2026-03-27`
+
+Scenario:
+`node scripts/run-benchmark.mjs worker-parse-only`
+
+Before:
+- `parseMs`: `2246.4`
+- `totalMs`: `2256.9`
+- `parts`: `505`
+- `rels`: `4`
+- `longTasks.count`: `1`
+- `longTasks.sumMs`: `265`
+- `longTasks.maxMs`: `265`
+
+After:
+- `parseMs`: `1997.2`
+- `totalMs`: `2005.3`
+- `parts`: `505`
+- `rels`: `4`
+- `longTasks.count`: `1`
+- `longTasks.sumMs`: `216`
+- `longTasks.maxMs`: `216`
+
+Delta:
+- `parseMs`: `-11.1%`
+- `totalMs`: `-11.1%`
+- `longTasks.sumMs`: `-18.5%`
+- `longTasks.maxMs`: `-18.5%`
+
+Notes:
+- This benchmark isolates the worker parse handoff path by running `parseAsync()` only with `useWorkerParser: true`, on the 520-page Routledge DOCX.
+- The main improvement comes from keeping the unzip/file table inside a long-lived parser worker session instead of posting the full package back to the main thread.
+- The worker-backed package now fetches images, fonts, and altChunks on demand, so the initial `postMessage` payload contains only serialized document structure.
+
+## Snapshot Worker
+
+Date:
+`2026-03-30`
+
+Scenarios:
+- `node scripts/run-benchmark.mjs virtualized-worker`
+- `node scripts/run-benchmark.mjs snapshot-worker`
+
+Internal worker result:
+- `parseMs`: `1719.1`
+- `renderMs`: `45.3`
+- `totalMs`: `1765.9`
+- `elements`: `686`
+- `pages`: `519`
+- `mountedPages`: `3`
+- `longTasks.sumMs`: `320`
+- `longTasks.maxMs`: `259`
+
+Snapshot worker result:
+- `parseMs`: `1360.4`
+- `parseRoundtripMs`: `1370.2`
+- `transferMs`: `440.1`
+- `workerRoundtripMs`: `1810.3`
+- `renderMs`: `506.9`
+- `totalMs`: `2322.4`
+- `elements`: `686`
+- `pages`: `519`
+- `mountedPages`: `3`
+- `snapshotResourceFiles`: `129`
+- `longTasks.sumMs`: `793`
+- `longTasks.maxMs`: `732`
+
+Delta vs internal worker:
+- `parseMs`: `-20.9%`
+- `workerRoundtripMs` vs internal `parseMs`: `+5.3%`
+- `renderMs`: `+1019.2%`
+- `totalMs`: `+31.5%`
+- `longTasks.sumMs`: `+147.8%`
+
+Notes:
+- The two-step snapshot benchmark measures `parseMs` entirely inside the caller-managed worker, then measures `transferMs` as a separate `postMessage(snapshot, transferables)` phase.
+- `parseToSnapshot()` itself is faster than the existing internal worker parse path because unzip, XML parse, and pagination are completed once inside the worker.
+- End-to-end time is currently worse because the main thread still pays a large snapshot handoff and rehydrate cost before DOM rendering starts.
+- `renderMs` for the snapshot path includes `WordDocument.fromSnapshot(...)` rehydration plus the normal `renderSnapshot(...)` DOM work.
+- This benchmark confirms the new API is functionally correct, but it also shows the next optimization target clearly: reduce snapshot payload size for `pages/parts` and cut main-thread rehydration work.
+
+## Snapshot Rehydrate Optimization
+
+Date:
+`2026-03-30`
+
+Scenario:
+- `node scripts/run-benchmark.mjs snapshot-worker`
+- custom breakdown on the same 520-page DOCX with `virtualizePages: true`
+
+Before:
+- `snapshot-worker.renderMs`: `517.9`
+- `snapshot-worker.totalMs`: `2647.0`
+- `snapshot-worker.longTasks.sumMs`: `825`
+- `snapshot-worker.longTasks.maxMs`: `744`
+- `rehydrateMs`: `502.7`
+- `domRenderMs`: `119.9`
+
+After:
+- `snapshot-worker.renderMs`: `26.7`
+- `snapshot-worker.totalMs`: `2146.9`
+- `snapshot-worker.longTasks.sumMs`: `353`
+- `snapshot-worker.longTasks.maxMs`: `271`
+- `rehydrateMs`: `1.6`
+- `domRenderMs`: `3.9`
+
+Delta:
+- `snapshot-worker.renderMs`: `-94.8%`
+- `snapshot-worker.totalMs`: `-18.9%`
+- `snapshot-worker.longTasks.sumMs`: `-57.2%`
+- `snapshot-worker.longTasks.maxMs`: `-63.6%`
+- `rehydrateMs`: `-99.7%`
+- `domRenderMs`: `-96.7%`
+
+Notes:
+- `WordDocument.fromSnapshot()` no longer deep-clones the entire `pages` tree up front.
+- Snapshot-backed documents now keep authoritative page metadata and clone each page only when it is actually rendered.
+- Snapshot part materialization is now selective: `styles`, `header/footer`, and `footnotes/endnotes` stay isolated for correctness, while read-mostly parts reuse the structured-cloned payload directly.
+- This keeps snapshot reusability intact while removing the biggest main-thread rehydrate hotspot for virtualized rendering.

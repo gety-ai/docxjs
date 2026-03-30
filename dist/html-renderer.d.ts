@@ -1,7 +1,7 @@
 import { WordDocument } from './word-document';
 import { WmlTable, IDomNumbering, WmlHyperlink, IDomImage, OpenXmlElement, WmlTableColumn, WmlTableCell, WmlText, WmlSymbol, WmlBreak, WmlNoteReference, WmlSmartTag, WmlAltChunk, WmlTableRow } from './document/dom';
 import { CommonProperties } from './document/common';
-import { Options } from './docx-preview';
+import { Options } from './options';
 import { DocumentElement } from './document/document';
 import { WmlParagraph } from './document/paragraph';
 import { FontTablePart } from './font-table/font-table';
@@ -15,25 +15,22 @@ import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { VirtualizedRenderer } from './virtualized-renderer';
+import { PaginatedPage, PaginatedSection } from './document-pager';
 interface CellPos {
     col: number;
     row: number;
 }
-interface Section {
-    sectProps: SectionProperties;
-    elements: OpenXmlElement[];
-    pageBreak: boolean;
-}
-interface RenderPage {
-    index: number;
-    key: number;
-    sections: Section[];
-    pageProps: SectionProperties;
-    footerProps: SectionProperties;
-    firstOfSection: boolean;
-    initialEndnoteIds: string[];
-    estimatedHeight: number;
-    isLastPage: boolean;
+export interface RenderedDocumentHandle {
+    destroy(): void;
+    getMountedPages(): Array<{
+        pageIndex: number;
+        element: HTMLElement;
+    }>;
+    findMountedPage(pageIndex: number): HTMLElement | null;
+    scrollToPage(pageIndex: number, options?: {
+        block?: ScrollLogicalPosition;
+        behavior?: ScrollBehavior;
+    }): boolean;
 }
 type CellVerticalMergeType = Record<number, HTMLTableCellElement>;
 export declare class HtmlRenderer {
@@ -62,7 +59,7 @@ export declare class HtmlRenderer {
     postRenderTasks: any[];
     pageVirtualizer: VirtualizedRenderer;
     constructor(htmlDocument: Document);
-    render(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement, options: Options): Promise<void>;
+    render(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement, options: Options): Promise<RenderedDocumentHandle>;
     renderTheme(themePart: ThemePart, styleContainer: HTMLElement): void;
     renderFontTable(fontsPart: FontTablePart, styleContainer: HTMLElement): void;
     processStyleName(className: string): string;
@@ -70,22 +67,23 @@ export declare class HtmlRenderer {
     prodessNumberings(numberings: IDomNumbering[]): void;
     processElement(element: OpenXmlElement): void;
     processTable(table: WmlTable): void;
+    inheritTableCellPadding(input: Record<string, string>, output: Record<string, string>): void;
     copyStyleProperties(input: Record<string, string>, output: Record<string, string>, attrs?: string[]): Record<string, string>;
     createPageElement(className: string, props: SectionProperties): HTMLElement;
     createSectionContent(props: SectionProperties): HTMLElement;
-    buildPages(document: DocumentElement): RenderPage[];
-    renderPage(page: RenderPage, document: DocumentElement): HTMLElement;
+    buildPages(document: DocumentElement): PaginatedPage[];
+    renderPage(page: PaginatedPage, document: DocumentElement): HTMLElement;
     renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement): void;
     isPageBreakElement(elem: OpenXmlElement): boolean;
     isPageBreakSection(prev: SectionProperties, next: SectionProperties): boolean;
-    splitBySection(elements: OpenXmlElement[], defaultProps: SectionProperties): Section[];
-    resolveSectionProps(sections: Section[]): Section[];
+    splitBySection(elements: OpenXmlElement[], defaultProps: SectionProperties): PaginatedSection[];
+    resolveSectionProps(sections: PaginatedSection[]): PaginatedSection[];
     mergeSectionProps(base: SectionProperties, override: SectionProperties): SectionProperties;
-    coalesceEmptySections(sections: Section[]): Section[];
-    sectionForcesStandalonePage(section: Section): boolean;
-    sectionHasVisibleContent(section: Section): boolean;
+    coalesceEmptySections(sections: PaginatedSection[]): PaginatedSection[];
+    sectionForcesStandalonePage(section: PaginatedSection): boolean;
+    sectionHasVisibleContent(section: PaginatedSection): boolean;
     elementHasVisibleContent(element: OpenXmlElement): any;
-    groupByPageBreaks(sections: Section[]): Section[][];
+    groupByPageBreaks(sections: PaginatedSection[]): PaginatedSection[][];
     renderWrapper(children: HTMLElement[]): HTMLDivElement;
     renderDefaultStyle(): HTMLStyleElement;
     renderNumbering(numberings: IDomNumbering[], styleContainer: HTMLElement): HTMLStyleElement;
@@ -110,11 +108,11 @@ export declare class HtmlRenderer {
     renderText(elem: WmlText): Text;
     renderDeletedText(elem: WmlText): Text;
     renderBreak(elem: WmlBreak): HTMLSpanElement;
-    renderSectionElements(section: Section, contentElement: HTMLElement): void;
-    shouldRenderManualColumns(section: Section): boolean;
+    renderSectionElements(section: PaginatedSection, contentElement: HTMLElement): void;
+    shouldRenderManualColumns(section: PaginatedSection): boolean;
     hasColumnBreak(elements: OpenXmlElement[]): boolean;
     elementHasBreak(element: OpenXmlElement, type: WmlBreak["break"]): any;
-    renderManualColumns(section: Section, contentElement: HTMLElement): void;
+    renderManualColumns(section: PaginatedSection, contentElement: HTMLElement): void;
     getEqualColumnWidth(columns: SectionProperties["columns"]): string;
     splitSectionByColumnBreaks(elements: OpenXmlElement[]): OpenXmlElement[][];
     splitElementByColumnBreaks(element: OpenXmlElement): OpenXmlElement[][];
@@ -166,7 +164,12 @@ export declare class HtmlRenderer {
     createComment(text: string): Comment;
     later(func: Function): void;
     flushPostRenderTasks(fromIndex?: number): void;
-    resolveVirtualScrollElement(bodyContainer: HTMLElement, pages: RenderPage[]): HTMLElement;
+    resolveVirtualScrollElement(bodyContainer: HTMLElement, pages: PaginatedPage[]): HTMLElement;
+    createRenderHandle(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement, bodyHost: HTMLElement, pages: PaginatedPage[]): RenderedDocumentHandle;
+    getStaticMountedPages(bodyHost: HTMLElement): {
+        pageIndex: number;
+        element: HTMLElement;
+    }[];
     collectEndnoteIds(elements: OpenXmlElement[], output: string[]): void;
     estimatePageHeight(props: SectionProperties): number;
     optimizeChildren(children: OpenXmlElement[]): OpenXmlElement[];

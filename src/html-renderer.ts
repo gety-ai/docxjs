@@ -7,7 +7,7 @@ import {
 	WmlTableRow
 } from './document/dom';
 import { CommonProperties } from './document/common';
-import { Options } from './docx-preview';
+import { Options } from './options';
 import { DocumentElement } from './document/document';
 import { WmlParagraph } from './document/paragraph';
 import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
@@ -24,6 +24,7 @@ import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { VirtualizedRenderer } from './virtualized-renderer';
+import { DocumentPager, PaginatedPage, PaginatedSection } from './document-pager';
 
 const ns = {
 	svg: "http://www.w3.org/2000/svg",
@@ -35,22 +36,20 @@ interface CellPos {
 	row: number;
 }
 
-interface Section {
-	sectProps: SectionProperties;
-	elements: OpenXmlElement[];
-	pageBreak: boolean;
-}
-
-interface RenderPage {
-	index: number;
-	key: number;
-	sections: Section[];
-	pageProps: SectionProperties;
-	footerProps: SectionProperties;
-	firstOfSection: boolean;
-	initialEndnoteIds: string[];
-	estimatedHeight: number;
-	isLastPage: boolean;
+export interface RenderedDocumentHandle {
+	destroy(): void;
+	getMountedPages(): Array<{
+		pageIndex: number;
+		element: HTMLElement;
+	}>;
+	findMountedPage(pageIndex: number): HTMLElement | null;
+	scrollToPage(
+		pageIndex: number,
+		options?: {
+			block?: ScrollLogicalPosition;
+			behavior?: ScrollBehavior;
+		},
+	): boolean;
 }
 
 declare const Highlight: any;
@@ -91,7 +90,7 @@ export class HtmlRenderer {
 	constructor(public htmlDocument: Document) {
 	}
 
-	async render(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement = null, options: Options) {
+	async render(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement = null, options: Options): Promise<RenderedDocumentHandle> {
 		this.document = document;
 		this.options = options;
 		this.className = options.className;
@@ -156,7 +155,7 @@ export class HtmlRenderer {
 		if (!options.ignoreFonts && document.fontTablePart)
 			this.renderFontTable(document.fontTablePart, styleContainer);
 
-		const pages = this.buildPages(document.documentPart.body);
+		const pages = document.pages ?? new DocumentPager(this.options, this.styleMap).buildPages(document.documentPart.body);
 		const scrollElement = this.resolveVirtualScrollElement(bodyContainer, pages);
 		let bodyHost = bodyContainer;
 
@@ -178,7 +177,7 @@ export class HtmlRenderer {
 					estimatedSize: page.estimatedHeight
 				})),
 				overscan: this.options.virtualizePagesOverscan,
-				renderItem: index => this.renderPage(pages[index], document.documentPart.body),
+				renderItem: index => this.renderPage(document.preparePageForRender(pages[index]), document.documentPart.body),
 				onRendered: () => {
 					this.flushPostRenderTasks();
 					this.refreshTabStops();
@@ -186,7 +185,7 @@ export class HtmlRenderer {
 			});
 			this.pageVirtualizer.mount();
 		} else {
-			var sectionElements = pages.map(page => this.renderPage(page, document.documentPart.body));
+			var sectionElements = pages.map(page => this.renderPage(document.preparePageForRender(page), document.documentPart.body));
 			bodyHost.dataset.docxPageCount = `${pages.length}`;
 
 			if (this.options.inWrapper) {
@@ -205,6 +204,7 @@ export class HtmlRenderer {
 		await Promise.allSettled(this.tasks);
 
 		this.refreshTabStops();
+		return this.createRenderHandle(document, bodyContainer, styleContainer, bodyHost, pages);
 	}
 
 	renderTheme(themePart: ThemePart, styleContainer: HTMLElement) {
@@ -263,34 +263,7 @@ export class HtmlRenderer {
 	}
 
 	processStyles(styles: IDomStyle[]) {
-		const stylesMap = keyBy(styles.filter(x => x.id != null), x => x.id);
-
-		for (const style of styles.filter(x => x.basedOn)) {
-			var baseStyle = stylesMap[style.basedOn];
-
-			if (baseStyle) {
-				style.paragraphProps = mergeDeep(style.paragraphProps, baseStyle.paragraphProps);
-				style.runProps = mergeDeep(style.runProps, baseStyle.runProps);
-
-				for (const baseValues of baseStyle.styles) {
-					const styleValues = style.styles.find(x => x.target == baseValues.target);
-
-					if (styleValues) {
-						this.copyStyleProperties(baseValues.values, styleValues.values);
-					} else {
-						style.styles.push({ ...baseValues, values: { ...baseValues.values } });
-					}
-				}
-			}
-			else if (this.options.debug)
-				console.warn(`Can't find base style ${style.basedOn}`);
-		}
-
-		for (let style of styles) {
-			style.cssName = this.processStyleName(style.id);
-		}
-
-		return stylesMap;
+		return DocumentPager.createStyleMap(styles, this.options);
 	}
 
 	prodessNumberings(numberings: IDomNumbering[]) {
@@ -326,8 +299,20 @@ export class HtmlRenderer {
 					"border-left", "border-right", "border-top", "border-bottom",
 					"padding-left", "padding-right", "padding-top", "padding-bottom"
 				]);
+				this.inheritTableCellPadding(table.cellStyle, c.cssStyle);
 
 				this.processElement(c);
+			}
+		}
+	}
+
+	inheritTableCellPadding(input: Record<string, string>, output: Record<string, string>) {
+		if (!input || !output)
+			return;
+
+		for (const key of ["padding-left", "padding-right", "padding-top", "padding-bottom"]) {
+			if (input[key] != null && shouldInheritPadding(output[key])) {
+				output[key] = input[key];
 			}
 		}
 	}
@@ -340,7 +325,7 @@ export class HtmlRenderer {
 		if (attrs == null) attrs = Object.getOwnPropertyNames(input);
 
 		for (var key of attrs) {
-			if (input.hasOwnProperty(key) && !output.hasOwnProperty(key))
+			if (input.hasOwnProperty(key) && (!output.hasOwnProperty(key) || output[key] == null || output[key] === ""))
 				output[key] = input[key];
 		}
 
@@ -384,55 +369,30 @@ export class HtmlRenderer {
 		return elem;
 	}	
 
-	buildPages(document: DocumentElement): RenderPage[] {
-		const result: RenderPage[] = [];
-		const allEndnoteIds: string[] = [];
-		this.processElement(document);
-		const sections = this.splitBySection(document.children, document.props);
-		const pages = this.groupByPageBreaks(sections);
-		let prevProps = null;
-
-		for (let i = 0, l = pages.length; i < l; i++) {
-			const pageSections = pages[i];
-			const pageProps = pageSections[0].sectProps;
-			let footerProps = pageProps;
-			const initialEndnoteIds = allEndnoteIds.slice();
-
-			for (const sect of pageSections) {
-				this.collectEndnoteIds(sect.elements, allEndnoteIds);
-				footerProps = sect.sectProps;
-			}
-
-			result.push({
-				index: i,
-				key: i,
-				sections: pageSections,
-				pageProps,
-				footerProps,
-				firstOfSection: prevProps != pageProps,
-				initialEndnoteIds,
-				estimatedHeight: this.estimatePageHeight(pageProps),
-				isLastPage: i == l - 1
-			});
-
-			prevProps = footerProps;
-		}
-
-		return result;
+	buildPages(document: DocumentElement): PaginatedPage[] {
+		return new DocumentPager(this.options, this.styleMap).buildPages(document);
 	}
 
-	renderPage(page: RenderPage, document: DocumentElement): HTMLElement {
+	renderPage(page: PaginatedPage, document: DocumentElement): HTMLElement {
 		this.currentFootnoteIds = [];
 		this.currentEndnoteIds = page.initialEndnoteIds.slice();
 
 		const pageElement = this.createPageElement(this.className, page.pageProps);
+		pageElement.dataset.index = `${page.pageIndex}`;
 		this.renderStyleValues(document.cssStyle, pageElement);
 
 		this.options.renderHeaders && this.renderHeaderFooter(page.pageProps.headerRefs, page.pageProps,
-			page.index, page.firstOfSection, pageElement);
+			page.pageIndex, page.firstOfSection, pageElement);
 
 		for (const sect of page.sections) {
 			const contentElement = this.createSectionContent(sect.sectProps);
+			sect.elements.forEach(element => {
+				if (element.type == DomType.Table) {
+					this.processTable(element as WmlTable);
+				} else {
+					this.processElement(element);
+				}
+			});
 			if (this.options.mergeAdjacent) {
 				sect.elements.forEach(element => this.ensureOptimizedTree(element));
 			}
@@ -450,7 +410,7 @@ export class HtmlRenderer {
 		}
 
 		this.options.renderFooters && this.renderHeaderFooter(page.footerProps.footerRefs, page.footerProps,
-			page.index, page.firstOfSection, pageElement);
+			page.pageIndex, page.firstOfSection, pageElement);
 
 		return pageElement;
 	}
@@ -513,8 +473,8 @@ export class HtmlRenderer {
 			|| prev.pageSize?.height != next.pageSize?.height;
 	}
 
-	splitBySection(elements: OpenXmlElement[], defaultProps: SectionProperties): Section[] {
-		var current: Section = { sectProps: null, elements: [], pageBreak: false };
+	splitBySection(elements: OpenXmlElement[], defaultProps: SectionProperties): PaginatedSection[] {
+		var current: PaginatedSection = { sectProps: null, elements: [], pageBreak: false };
 		var result = [current];
 
 		for (let elem of elements) {
@@ -585,7 +545,7 @@ export class HtmlRenderer {
 		return this.coalesceEmptySections(this.resolveSectionProps(result));
 	}
 
-	resolveSectionProps(sections: Section[]) {
+	resolveSectionProps(sections: PaginatedSection[]) {
 		let previous: SectionProperties = null;
 
 		for (const section of sections) {
@@ -624,8 +584,8 @@ export class HtmlRenderer {
 		};
 	}
 
-	coalesceEmptySections(sections: Section[]) {
-		const result: Section[] = [];
+	coalesceEmptySections(sections: PaginatedSection[]) {
+		const result: PaginatedSection[] = [];
 
 		for (let i = 0; i < sections.length; i++) {
 			const section = sections[i];
@@ -644,7 +604,7 @@ export class HtmlRenderer {
 		return result;
 	}
 
-	sectionForcesStandalonePage(section: Section) {
+	sectionForcesStandalonePage(section: PaginatedSection) {
 		switch (section.sectProps?.type) {
 			case SectionType.EvenPage:
 			case SectionType.OddPage:
@@ -654,7 +614,7 @@ export class HtmlRenderer {
 		}
 	}
 
-	sectionHasVisibleContent(section: Section) {
+	sectionHasVisibleContent(section: PaginatedSection) {
 		return section.elements?.some(element => this.elementHasVisibleContent(element)) ?? false;
 	}
 
@@ -683,10 +643,10 @@ export class HtmlRenderer {
 		return element.children?.some(child => this.elementHasVisibleContent(child)) ?? false;
 	}
 
-	groupByPageBreaks(sections: Section[]): Section[][] {
+	groupByPageBreaks(sections: PaginatedSection[]): PaginatedSection[][] {
 		let current = [];
 		let prev: SectionProperties;
-		const result: Section[][] = [current];
+		const result: PaginatedSection[][] = [current];
 
 		for (let s of sections) {
 			current.push(s);
@@ -1081,7 +1041,7 @@ section.${c}>footer { z-index: 1; }
 		if (elems == null)
 			return null;
 
-		var result = elems.flatMap(e => this.renderElement(e)).filter(e => e != null);
+		var result = elems.flatMap(e => e ? this.renderElement(e) : null).filter(e => e != null);
 
 		if (into)
 			appendChildren(into, result);
@@ -1322,7 +1282,7 @@ section.${c}>footer { z-index: 1; }
 		return null;
 	}
 
-	renderSectionElements(section: Section, contentElement: HTMLElement) {
+	renderSectionElements(section: PaginatedSection, contentElement: HTMLElement) {
 		if (this.shouldRenderManualColumns(section)) {
 			this.renderManualColumns(section, contentElement);
 			return;
@@ -1331,7 +1291,7 @@ section.${c}>footer { z-index: 1; }
 		this.renderElements(section.elements, contentElement);
 	}
 
-	shouldRenderManualColumns(section: Section) {
+	shouldRenderManualColumns(section: PaginatedSection) {
 		const columns = section.sectProps?.columns;
 
 		if (!columns || columns.numberOfColumns <= 1 || columns.equalWidth)
@@ -1358,7 +1318,7 @@ section.${c}>footer { z-index: 1; }
 		return element.children?.some(child => this.elementHasBreak(child, type)) ?? false;
 	}
 
-	renderManualColumns(section: Section, contentElement: HTMLElement) {
+	renderManualColumns(section: PaginatedSection, contentElement: HTMLElement) {
 		const columns = section.sectProps.columns;
 		const groups = this.splitSectionByColumnBreaks(section.elements);
 		const columnCount = Math.max(columns.numberOfColumns, groups.length);
@@ -2031,11 +1991,88 @@ section.${c}>footer { z-index: 1; }
 		tasks.forEach(task => task());
 	}
 
-	resolveVirtualScrollElement(bodyContainer: HTMLElement, pages: RenderPage[]): HTMLElement {
+	resolveVirtualScrollElement(bodyContainer: HTMLElement, pages: PaginatedPage[]): HTMLElement {
 		if (!this.options.virtualizePages || pages.length < 2 || this.options.renderComments)
 			return null;
 
 		return findScrollableElement(bodyContainer, this.htmlDocument);
+	}
+
+	createRenderHandle(
+		document: WordDocument,
+		bodyContainer: HTMLElement,
+		styleContainer: HTMLElement,
+		bodyHost: HTMLElement,
+		pages: PaginatedPage[]
+	): RenderedDocumentHandle {
+		const pageIndexMap = new Map(pages.map((page, index) => [page.pageIndex, index]));
+
+		return {
+			destroy: () => {
+				if (this.commentHighlight && this.options.renderComments) {
+					(CSS as any).highlights.delete(`${this.className}-comments`);
+				}
+
+				this.pageVirtualizer?.destroy();
+				this.pageVirtualizer = null;
+
+				removeAllElements(bodyContainer);
+
+				if (styleContainer && styleContainer !== bodyContainer) {
+					removeAllElements(styleContainer);
+				}
+
+				void document.dispose();
+			},
+			getMountedPages: () => {
+				if (this.pageVirtualizer) {
+					return this.pageVirtualizer.getMountedItems().map(item => ({
+						pageIndex: pages[item.index].pageIndex,
+						element: item.element
+					}));
+				}
+
+				return this.getStaticMountedPages(bodyHost);
+			},
+			findMountedPage: (pageIndex: number) => {
+				if (this.pageVirtualizer) {
+					const virtualIndex = pageIndexMap.get(pageIndex);
+					return virtualIndex == null ? null : this.pageVirtualizer.findMountedItem(virtualIndex);
+				}
+
+				return bodyHost.querySelector(`section.${this.className}[data-index="${pageIndex}"]`);
+			},
+			scrollToPage: (pageIndex: number, options = {}) => {
+				const virtualIndex = pageIndexMap.get(pageIndex);
+
+				if (virtualIndex == null) {
+					return false;
+				}
+
+				if (this.pageVirtualizer) {
+					this.pageVirtualizer.scrollToIndex(virtualIndex, options);
+					return true;
+				}
+
+				const page = bodyHost.querySelector(`section.${this.className}[data-index="${pageIndex}"]`) as HTMLElement | null;
+
+				if (!page) {
+					return false;
+				}
+
+				page.scrollIntoView(options);
+				return true;
+			}
+		};
+	}
+
+	getStaticMountedPages(bodyHost: HTMLElement) {
+		return Array
+			.from(bodyHost.querySelectorAll(`section.${this.className}[data-index]`))
+			.map(element => ({
+				pageIndex: Number((element as HTMLElement).dataset.index),
+				element: element as HTMLElement
+			}));
 	}
 
 	collectEndnoteIds(elements: OpenXmlElement[], output: string[]) {
@@ -2129,7 +2166,8 @@ function removeAllElements(elem: HTMLElement) {
 }
 
 function appendChildren(elem: Node, children: (Node | string)[]) {
-	children.forEach(c => elem.appendChild(isString(c) ? document.createTextNode(c) : c));
+	const ownerDocument = elem.ownerDocument ?? document;
+	children.forEach(c => elem.appendChild(isString(c) ? ownerDocument.createTextNode(c) : c));
 }
 
 function findParent<T extends OpenXmlElement>(elem: OpenXmlElement, type: DomType): T {
@@ -2181,6 +2219,13 @@ function parseSizeToPixels(value: string): number {
 		case "q": return amount * 96 / 101.6;
 		default: return amount;
 	}
+}
+
+function shouldInheritPadding(value: string) {
+	if (value == null || value === "")
+		return true;
+
+	return /^0(?:\.0+)?(?:px|pt|pc|in|cm|mm|q)?$/i.test(value.trim());
 }
 
 const simpleInlineChildTypes = new Set([

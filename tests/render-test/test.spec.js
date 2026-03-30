@@ -143,10 +143,70 @@ describe("Render document", function () {
     baselineDiv.remove();
     optimizedDiv.remove();
   });
+
+  it("parseToSnapshot and renderSnapshot should preserve full document markup", async () => {
+    const path = 'header-footer';
+    const docBlob = await fetch(`/base/tests/render-test/${path}/document.docx`).then(r => r.blob());
+    const resultText = await fetch(`/base/tests/render-test/${path}/result.html`).then(r => r.text());
+    const div = document.createElement("div");
+
+    document.body.appendChild(div);
+
+    const snapshot = await docx.parseToSnapshot(docBlob);
+    const transferables = docx.collectSnapshotTransferables(snapshot);
+
+    expect(snapshot.meta.pageCount).toBeGreaterThan(1);
+    expect(transferables.length).toBe(snapshot.files.length);
+
+    await docx.renderSnapshot(snapshot, div);
+
+    const actual = formatHTML(div.innerHTML);
+    const expected = formatHTML(resultText);
+
+    expect(actual).toBe(expected);
+
+    div.remove();
+  });
+
+  it("renderSnapshot should expose mounted page handles for virtualized rendering", async () => {
+    const path = 'header-footer';
+    const docBlob = await fetch(`/base/tests/render-test/${path}/document.docx`).then(r => r.blob());
+    const scrollHost = document.createElement("div");
+    const div = document.createElement("div");
+
+    scrollHost.style.height = "900px";
+    scrollHost.style.overflow = "auto";
+    scrollHost.appendChild(div);
+    document.body.appendChild(scrollHost);
+
+    const snapshot = await docx.parseToSnapshot(docBlob);
+    const handle = await docx.renderSnapshot(snapshot, div, null, {
+      virtualizePages: true,
+      virtualizePagesOverscan: 0
+    });
+
+    const initialPages = handle.getMountedPages();
+    expect(initialPages.length).toBeGreaterThan(0);
+    expect(initialPages[0].element.dataset.index).toBe(`${initialPages[0].pageIndex}`);
+    expect(handle.findMountedPage(initialPages[0].pageIndex)).toBe(initialPages[0].element);
+
+    const lastPageIndex = snapshot.pages[snapshot.pages.length - 1].pageIndex;
+    expect(handle.scrollToPage(lastPageIndex, { block: "start" })).toBe(true);
+    await waitFrames(6);
+
+    const lastPage = handle.findMountedPage(lastPageIndex);
+    expect(lastPage).not.toBeNull();
+    expect(lastPage.dataset.index).toBe(`${lastPageIndex}`);
+
+    handle.destroy();
+    expect(div.innerHTML).toBe("");
+
+    scrollHost.remove();
+  });
 });
 
 function formatHTML(text) {
-  return text.replace(/\t+|\s+/ig, ' ').replace(/></ig, '>\n<');
+  return text.replace(/\sdata-index="[^"]*"/ig, '').replace(/\t+|\s+/ig, ' ').replace(/></ig, '>\n<');
 }
 
 function normalizeSectionHTML(section) {

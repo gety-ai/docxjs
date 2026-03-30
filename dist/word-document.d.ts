@@ -14,10 +14,14 @@ import { SettingsPart } from "./settings/settings-part";
 import { CustomPropsPart } from "./document-props/custom-props-part";
 import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
+import type { DocxSnapshot } from "./snapshot";
+import type { PaginatedPage } from "./document-pager";
 export declare class WordDocument {
     private _package;
     private _parser;
     private _options;
+    private _objectUrls;
+    private _snapshotPages;
     rels: Relationship[];
     parts: Part[];
     partsMap: Record<string, Part>;
@@ -34,9 +38,13 @@ export declare class WordDocument {
     settingsPart: SettingsPart;
     commentsPart: CommentsPart;
     commentsExtendedPart: CommentsExtendedPart;
+    pages: PaginatedPage[];
     static load(blob: Blob | any, parser: DocumentParser, options: any): Promise<WordDocument>;
+    static fromSnapshot(snapshot: DocxSnapshot, options: any): WordDocument;
+    preparePageForRender(page: PaginatedPage): PaginatedPage;
     private applySerializedDocument;
     save(type?: OpenXmlPackageSaveType): Promise<any>;
+    dispose(): Promise<void>;
     private loadRelationshipPart;
     loadDocumentImage(id: string, part?: Part): Promise<string>;
     loadNumberingImage(id: string): Promise<string>;

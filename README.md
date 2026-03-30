@@ -85,7 +85,104 @@ renderDocument(
     styleContainer: HTMLElement,
     options: Options
 ): Promise<void>
+
+// parse once, in any worker or thread, and return a renderable snapshot
+parseToSnapshot(
+    document: Blob | ArrayBuffer | Uint8Array,
+    options?: ParseOptions
+): Promise<DocxSnapshot>
+
+// collect transferable buffers from a snapshot before postMessage(...)
+collectSnapshotTransferables(
+    snapshot: DocxSnapshot
+): Transferable[]
+
+// render from a previously parsed snapshot without unzip / XML parse / repagination
+renderSnapshot(
+    snapshot: DocxSnapshot,
+    bodyContainer: HTMLElement,
+    styleContainer?: HTMLElement,
+    options?: RenderOptions
+): Promise<RenderedSnapshot>
 ```
+
+Snapshot API
+-----
+`parseToSnapshot()` is the low-level path for applications that want to manage their own worker and ensure the same DOCX is parsed only once.
+
+Properties:
+- `parseToSnapshot()` is worker-safe and does not create an internal parser worker.
+- `renderSnapshot()` renders directly from `snapshot.pages`.
+- `renderSnapshot()` does not unzip the DOCX again.
+- `renderSnapshot()` does not parse XML again.
+- `renderSnapshot()` does not repaginate.
+
+The snapshot contains:
+- serialized document parts needed for rendering
+- a pruned resource file list for images, fonts and altChunks
+- `pages`, which are the authoritative page boundaries used by the renderer
+
+Worker-managed snapshot example
+-----
+Main thread:
+
+```ts
+import * as docx from "docx-preview";
+
+const worker = new Worker(new URL("./docx-worker.js", import.meta.url), {
+  type: "module"
+});
+
+const buffer = await file.arrayBuffer();
+
+const snapshot = await new Promise((resolve, reject) => {
+  worker.onmessage = event => resolve(event.data.snapshot);
+  worker.onerror = reject;
+  worker.postMessage({ type: "parse-docx", buffer }, [buffer]);
+});
+
+const rendered = await docx.renderSnapshot(snapshot, container, styleContainer, {
+  virtualizePages: true
+});
+
+rendered.scrollToPage(10, { block: "start" });
+```
+
+Worker:
+
+```ts
+import {
+  parseToSnapshot,
+  collectSnapshotTransferables
+} from "docx-preview";
+
+self.onmessage = async event => {
+  if (event.data?.type !== "parse-docx") {
+    return;
+  }
+
+  const snapshot = await parseToSnapshot(event.data.buffer, {
+    breakPages: true,
+    ignoreLastRenderedPageBreak: true
+  });
+
+  self.postMessage(
+    { type: "parsed-docx", snapshot },
+    collectSnapshotTransferables(snapshot)
+  );
+};
+```
+
+`RenderedSnapshot` exposes:
+- `destroy()`
+- `getMountedPages()`
+- `findMountedPage(pageIndex)`
+- `scrollToPage(pageIndex, options)`
+
+Important:
+- `ParseOptions` control page boundaries. Use the same `breakPages` and `ignoreLastRenderedPageBreak` semantics when rendering the snapshot.
+- `RenderOptions` control presentation, for example `virtualizePages`, `renderHeaders`, `renderFooters`, `renderFootnotes`, `renderEndnotes`, and `className`.
+- `snapshot.pages[i].pageIndex` is stable and is copied to `section.docx[data-index]`.
 
 Vite / bundlers
 -----

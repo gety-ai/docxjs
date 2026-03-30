@@ -25,6 +25,14 @@ const scenarios = {
       useWorkerParser: true
     }
   },
+  "worker-parse-only": {
+    label: "worker-parse-only",
+    mode: "parse-only",
+    docxOptions: {
+      debug: false,
+      useWorkerParser: true
+    }
+  },
   virtualized: {
     label: "virtualized-pages",
     docxOptions: {
@@ -38,6 +46,20 @@ const scenarios = {
       debug: false,
       virtualizePages: true,
       useWorkerParser: true
+    }
+  },
+  "snapshot-worker": {
+    label: "snapshot-worker",
+    mode: "snapshot-worker",
+    parseOptions: {
+      debug: false
+    },
+    renderOptions: {
+      debug: false,
+      virtualizePages: true
+    },
+    docxOptions: {
+      className: "docx"
     }
   },
   "optimized-all": {

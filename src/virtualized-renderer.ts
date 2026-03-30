@@ -99,7 +99,6 @@ export class VirtualizedRenderer {
 
 		for (const item of virtualItems) {
 			const element = this.elementCache.get(item.index) ?? this.options.renderItem(item.index);
-			element.dataset.index = `${item.index}`;
 			nextCache.set(item.index, element);
 			fragment.appendChild(element);
 		}
@@ -113,5 +112,37 @@ export class VirtualizedRenderer {
 
 		this.elementCache = nextCache;
 		this.options.onRendered?.();
+	}
+
+	getMountedItems() {
+		return Array.from(this.elementCache.entries()).map(([index, element]) => ({ index, element }));
+	}
+
+	findMountedItem(index: number) {
+		return this.elementCache.get(index) ?? null;
+	}
+
+	scrollToIndex(index: number, options: {
+		block?: ScrollLogicalPosition;
+		behavior?: ScrollBehavior;
+	} = {}) {
+		this.virtualizer.scrollToIndex(index, {
+			align: mapBlockToAlign(options.block),
+			behavior: options.behavior as any
+		});
+	}
+}
+
+function mapBlockToAlign(block?: ScrollLogicalPosition) {
+	switch (block) {
+		case "center":
+			return "center";
+		case "end":
+			return "end";
+		case "nearest":
+			return "auto";
+		case "start":
+		default:
+			return "start";
 	}
 }

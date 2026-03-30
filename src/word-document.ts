@@ -16,8 +16,10 @@ import { SettingsPart } from "./settings/settings-part";
 import { CustomPropsPart } from "./document-props/custom-props-part";
 import { CommentsPart } from "./comments/comments-part";
 import { CommentsExtendedPart } from "./comments/comments-extended-part";
-import { parseDocumentInWorker } from "./worker/client";
-import { SerializedFileEntry, SerializedWordDocument } from "./worker/worker-types";
+import { parseDocumentInWorker, WorkerSessionPackage } from "./worker/client";
+import { SerializedWordDocument } from "./worker/worker-types";
+import type { DocxSnapshot, SnapshotFile } from "./snapshot";
+import type { PaginatedPage } from "./document-pager";
 
 const topLevelRels = [
 	{ type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
@@ -27,9 +29,11 @@ const topLevelRels = [
 ];
 
 export class WordDocument {
-	private _package: OpenXmlPackage;
+	private _package: OpenXmlPackage | WorkerSessionPackage;
 	private _parser: DocumentParser;
 	private _options: any;
+	private _objectUrls = new Set<string>();
+	private _snapshotPages: PaginatedPage[] = null;
 
 	rels: Relationship[];
 	parts: Part[] = [];
@@ -48,6 +52,7 @@ export class WordDocument {
 	settingsPart: SettingsPart;
 	commentsPart: CommentsPart;
 	commentsExtendedPart: CommentsExtendedPart;
+	pages: PaginatedPage[] = null;
 
 	static async load(blob: Blob | any, parser: DocumentParser, options: any): Promise<WordDocument> {
 		var d = new WordDocument();
@@ -57,11 +62,11 @@ export class WordDocument {
 
 		if (options.useWorkerParser) {
 			try {
-				const parsed = await parseDocumentInWorker(blob, options);
+				const workerResult = await parseDocumentInWorker(blob, options);
 
-				if (parsed) {
-					d._package = OpenXmlPackage.fromFiles(fileEntriesToMap(parsed.files), options);
-					d.applySerializedDocument(parsed);
+				if (workerResult) {
+					d._package = workerResult.package;
+					d.applySerializedDocument(workerResult.parsed);
 					return d;
 				}
 			} catch (error) {
@@ -82,9 +87,28 @@ export class WordDocument {
 		return d;
 	}
 
+	static fromSnapshot(snapshot: DocxSnapshot, options: any): WordDocument {
+		const document = new WordDocument();
+		document._options = options;
+		document._package = OpenXmlPackage.fromFiles(snapshotFilesToMap(snapshot.files), options);
+		document.applySerializedDocument({
+			sessionId: "snapshot",
+			rels: snapshot.rels,
+			parts: materializeSnapshotParts(snapshot.parts),
+			rolePaths: snapshot.rolePaths
+		} as SerializedWordDocument);
+		document.pages = snapshot.pages;
+		document._snapshotPages = snapshot.pages;
+		return document;
+	}
+
+	preparePageForRender(page: PaginatedPage): PaginatedPage {
+		return this._snapshotPages ? cloneSerializable(page) : page;
+	}
+
 	private applySerializedDocument(data: SerializedWordDocument) {
 		this.rels = data.rels;
-		this.parts = data.parts.map(part => ({ ...part })) as any[];
+		this.parts = data.parts as any[];
 		this.partsMap = keyBy(this.parts, x => x.path) as any;
 
 		this.documentPart = data.rolePaths.documentPart ? this.partsMap[data.rolePaths.documentPart] as any : null;
@@ -100,10 +124,30 @@ export class WordDocument {
 		this.settingsPart = data.rolePaths.settingsPart ? this.partsMap[data.rolePaths.settingsPart] as any : null;
 		this.commentsPart = data.rolePaths.commentsPart ? this.partsMap[data.rolePaths.commentsPart] as any : null;
 		this.commentsExtendedPart = data.rolePaths.commentsExtendedPart ? this.partsMap[data.rolePaths.commentsExtendedPart] as any : null;
+
+		if (this.commentsPart?.comments && !this.commentsPart.commentMap) {
+			this.commentsPart.commentMap = keyBy(this.commentsPart.comments, x => x.id) as any;
+		}
+
+		if (this.commentsExtendedPart?.comments && !this.commentsExtendedPart.commentMap) {
+			this.commentsExtendedPart.commentMap = keyBy(this.commentsExtendedPart.comments, x => x.paraId) as any;
+		}
 	}
 
 	save(type: OpenXmlPackageSaveType = "blob"): Promise<any> {
 		return this._package.save(type);
+	}
+
+	async dispose(): Promise<void> {
+		for (const url of this._objectUrls) {
+			URL.revokeObjectURL(url);
+		}
+
+		this._objectUrls.clear();
+
+		if (typeof (this._package as WorkerSessionPackage)?.dispose === "function") {
+			await (this._package as WorkerSessionPackage).dispose();
+		}
 	}
 
 	private async loadRelationshipPart(path: string, type: string): Promise<Part> {
@@ -114,66 +158,67 @@ export class WordDocument {
 			return null;
 
 		let part: Part = null;
+		const pkg = this._package as any;
 
 		switch (type) {
 			case RelationshipTypes.OfficeDocument:
-				this.documentPart = part = new DocumentPart(this._package, path, this._parser);
+				this.documentPart = part = new DocumentPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.FontTable:
-				this.fontTablePart = part = new FontTablePart(this._package, path);
+				this.fontTablePart = part = new FontTablePart(pkg, path);
 				break;
 
 			case RelationshipTypes.Numbering:
-				this.numberingPart = part = new NumberingPart(this._package, path, this._parser);
+				this.numberingPart = part = new NumberingPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.Styles:
-				this.stylesPart = part = new StylesPart(this._package, path, this._parser);
+				this.stylesPart = part = new StylesPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.Theme:
-				this.themePart = part = new ThemePart(this._package, path);
+				this.themePart = part = new ThemePart(pkg, path);
 				break;
 
 			case RelationshipTypes.Footnotes:
-				this.footnotesPart = part = new FootnotesPart(this._package, path, this._parser);
+				this.footnotesPart = part = new FootnotesPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.Endnotes:
-				this.endnotesPart = part = new EndnotesPart(this._package, path, this._parser);
+				this.endnotesPart = part = new EndnotesPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.Footer:
-				part = new FooterPart(this._package, path, this._parser);
+				part = new FooterPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.Header:
-				part = new HeaderPart(this._package, path, this._parser);
+				part = new HeaderPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.CoreProperties:
-				this.corePropsPart = part = new CorePropsPart(this._package, path);
+				this.corePropsPart = part = new CorePropsPart(pkg, path);
 				break;
 
 			case RelationshipTypes.ExtendedProperties:
-				this.extendedPropsPart = part = new ExtendedPropsPart(this._package, path);
+				this.extendedPropsPart = part = new ExtendedPropsPart(pkg, path);
 				break;
 
 			case RelationshipTypes.CustomProperties:
-				part = new CustomPropsPart(this._package, path);
+				part = new CustomPropsPart(pkg, path);
 				break;
 	
 			case RelationshipTypes.Settings:
-				this.settingsPart = part = new SettingsPart(this._package, path);
+				this.settingsPart = part = new SettingsPart(pkg, path);
 				break;
 
 			case RelationshipTypes.Comments:
-				this.commentsPart = part = new CommentsPart(this._package, path, this._parser);
+				this.commentsPart = part = new CommentsPart(pkg, path, this._parser);
 				break;
 
 			case RelationshipTypes.CommentsExtended:
-				this.commentsExtendedPart = part = new CommentsExtendedPart(this._package, path);
+				this.commentsExtendedPart = part = new CommentsExtendedPart(pkg, path);
 				break;
 		}
 
@@ -220,7 +265,9 @@ export class WordDocument {
 			return blobToBase64(blob);
 		}
 
-		return URL.createObjectURL(blob);
+		const url = URL.createObjectURL(blob);
+		this._objectUrls.add(url);
+		return url;
 	}
 
 	findPartByRelId(id: string, basePart: Part = null) {
@@ -241,16 +288,6 @@ export class WordDocument {
 	}
 }
 
-function fileEntriesToMap(files: SerializedFileEntry[]) {
-	const result: Record<string, Uint8Array> = {};
-
-	for (const file of files) {
-		result[file.path] = new Uint8Array(file.buffer);
-	}
-
-	return result;
-}
-
 export function deobfuscate(data: Uint8Array, guidKey: string) {
 	const len = 16;
 	const trimmed = guidKey.replace(/{|}|-/g, "");
@@ -264,4 +301,60 @@ export function deobfuscate(data: Uint8Array, guidKey: string) {
 
 	// FIXME: return type
 	return data as any;
+}
+
+function snapshotFilesToMap(files: SnapshotFile[]) {
+	const result: Record<string, Uint8Array> = {};
+
+	for (const file of files ?? []) {
+		result[file.path] = new Uint8Array(file.buffer);
+	}
+
+	return result;
+}
+
+function materializeSnapshotParts(parts: SerializedWordDocument["parts"]) {
+	return (parts ?? []).map(part => {
+		const materialized = { ...part };
+
+		switch (part.kind) {
+			case "styles":
+				materialized.styles = cloneSerializable(part.styles);
+				break;
+
+			case "header":
+			case "footer":
+				materialized.rootElement = cloneSerializable(part.rootElement);
+				break;
+
+			case "footnotes":
+			case "endnotes":
+				materialized.notes = cloneSerializable(part.notes);
+				break;
+		}
+
+		return materialized;
+	});
+}
+
+function cloneSerializable<T>(value: T): T {
+	if (typeof structuredClone === "function") {
+		return structuredClone(value);
+	}
+
+	if (Array.isArray(value)) {
+		return value.map(item => cloneSerializable(item)) as T;
+	}
+
+	if (!value || typeof value !== "object") {
+		return value;
+	}
+
+	const result: Record<string, any> = {};
+
+	for (const [key, entry] of Object.entries(value)) {
+		result[key] = cloneSerializable(entry);
+	}
+
+	return result as T;
 }

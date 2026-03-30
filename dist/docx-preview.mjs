@@ -150,7 +150,7 @@ function parseCommonProperty(elem, props, xml) {
 function parseXmlString(xmlString, trimXmlDeclaration = false) {
     if (trimXmlDeclaration)
         xmlString = xmlString.replace(/<[?].*[?]>/, "");
-    xmlString = removeUTF8BOM(xmlString);
+    xmlString = removeUTF8BOM$1(xmlString);
     const result = new DOMParser().parseFromString(xmlString, "application/xml");
     const errorText = hasXmlParserError(result);
     if (errorText)
@@ -160,7 +160,7 @@ function parseXmlString(xmlString, trimXmlDeclaration = false) {
 function hasXmlParserError(doc) {
     return doc.getElementsByTagName("parsererror")[0]?.textContent;
 }
-function removeUTF8BOM(data) {
+function removeUTF8BOM$1(data) {
     return data.charCodeAt(0) === 0xFEFF ? data.substring(1) : data;
 }
 function serializeXmlString(elem) {
@@ -1375,18 +1375,18 @@ class OpenXmlPackage {
         this.encoder = new TextEncoder();
     }
     get(path) {
-        const p = normalizePath(path);
+        const p = normalizePath$2(path);
         return this._files[p] ?? this._files[p.replace(/\//g, "\\")] ?? null;
     }
     update(path, content) {
-        this._files[normalizePath(path)] = toUint8Array(content, this.encoder);
+        this._files[normalizePath$2(path)] = toUint8Array(content, this.encoder);
     }
     static async load(input, options) {
-        const data = await inputToUint8Array(input);
-        return new OpenXmlPackage(normalizeFiles(unzipSync(data)), options);
+        const data = await inputToUint8Array$1(input);
+        return new OpenXmlPackage(normalizeFiles$1(unzipSync(data)), options);
     }
     static fromFiles(files, options) {
-        return new OpenXmlPackage(normalizeFiles(files), options);
+        return new OpenXmlPackage(normalizeFiles$1(files), options);
     }
     save(type = "blob") {
         const zipped = zipSync(this._files);
@@ -1429,17 +1429,17 @@ class OpenXmlPackage {
         return parseXmlString(txt, this.options.trimXmlDeclaration);
     }
 }
-function normalizePath(path) {
+function normalizePath$2(path) {
     return path.startsWith('/') ? path.substr(1) : path;
 }
-function normalizeFiles(files) {
+function normalizeFiles$1(files) {
     const result = {};
     for (const [path, file] of Object.entries(files ?? {})) {
-        result[normalizePath(path)] = file;
+        result[normalizePath$2(path)] = file;
     }
     return result;
 }
-async function inputToUint8Array(input) {
+async function inputToUint8Array$1(input) {
     if (input instanceof Uint8Array)
         return input.slice();
     if (input instanceof ArrayBuffer)
@@ -2229,29 +2229,170 @@ async function parseDocumentInWorker(data, options) {
     if (!workerUrl || typeof Worker === "undefined") {
         return null;
     }
-    const buffer = await toArrayBuffer(data);
-    return new Promise((resolve, reject) => {
-        const worker = new Worker(workerUrl);
-        worker.onmessage = event => {
-            const payload = event.data;
-            worker.terminate();
-            if (payload?.type === "parsed") {
-                resolve(payload.payload);
-            }
-            else {
-                reject(new Error(payload?.error ?? "Unknown parser worker error"));
-            }
+    const client = new ParserWorkerClient(workerUrl);
+    try {
+        const buffer = await toArrayBuffer$1(data);
+        const parsed = await client.parse(buffer, options);
+        return {
+            parsed,
+            package: new WorkerSessionPackage(client, parsed.sessionId, options)
         };
-        worker.onerror = event => {
-            worker.terminate();
-            reject(event.error ?? new Error(event.message));
-        };
-        worker.postMessage({
+    }
+    catch (error) {
+        client.terminate();
+        throw error;
+    }
+}
+class ParserWorkerClient {
+    constructor(workerUrl) {
+        this.nextRequestId = 1;
+        this.pending = new Map();
+        this.worker = new Worker(workerUrl);
+        this.worker.onmessage = event => this.handleMessage(event.data);
+        this.worker.onerror = event => this.failAll(event.error ?? new Error(event.message));
+    }
+    async parse(buffer, options) {
+        const response = await this.request({
             type: "parse",
             buffer,
-            options: JSON.parse(JSON.stringify(options))
+            options: prepareWorkerOptions(options)
         }, [buffer]);
-    });
+        return response.payload;
+    }
+    async loadResource(sessionId, path, outputType) {
+        const response = await this.request({
+            type: "load-resource",
+            sessionId,
+            path,
+            outputType
+        });
+        if (response.type === "null")
+            return null;
+        if (outputType === "string")
+            return response.value;
+        const buffer = response.value;
+        switch (outputType) {
+            case "uint8array":
+                return new Uint8Array(buffer);
+            case "blob":
+                return new Blob([new Uint8Array(buffer)]);
+            case "arraybuffer":
+            default:
+                return buffer;
+        }
+    }
+    async save(sessionId, outputType) {
+        const response = await this.request({
+            type: "save",
+            sessionId,
+            outputType
+        });
+        const buffer = response.value;
+        switch (outputType) {
+            case "uint8array":
+                return new Uint8Array(buffer);
+            case "blob":
+                return new Blob([new Uint8Array(buffer)]);
+            case "arraybuffer":
+            default:
+                return buffer;
+        }
+    }
+    async dispose(sessionId) {
+        if (!this.worker)
+            return;
+        try {
+            await this.request({
+                type: "dispose",
+                sessionId
+            });
+        }
+        finally {
+            this.terminate();
+        }
+    }
+    terminate() {
+        if (!this.worker)
+            return;
+        this.worker.terminate();
+        this.worker = null;
+        this.failAll(new Error("Parser worker terminated"));
+    }
+    request(message, transfer = []) {
+        const requestId = this.nextRequestId++;
+        return new Promise((resolve, reject) => {
+            this.pending.set(requestId, {
+                resolve: resolve,
+                reject
+            });
+            this.worker.postMessage({
+                ...message,
+                requestId
+            }, transfer);
+        });
+    }
+    handleMessage(message) {
+        const pending = this.pending.get(message.requestId);
+        if (!pending)
+            return;
+        this.pending.delete(message.requestId);
+        if (message.type === "error") {
+            pending.reject(new Error(message.error ?? "Unknown parser worker error"));
+        }
+        else {
+            pending.resolve(message);
+        }
+    }
+    failAll(error) {
+        if (this.pending.size === 0)
+            return;
+        const pending = Array.from(this.pending.values());
+        this.pending.clear();
+        for (const entry of pending) {
+            entry.reject(error);
+        }
+    }
+}
+class WorkerSessionPackage {
+    constructor(client, sessionId, options) {
+        this.client = client;
+        this.sessionId = sessionId;
+        this.options = options;
+        this.xmlParser = new XmlParser();
+    }
+    get(path) {
+        return path ? true : null;
+    }
+    update() {
+        throw new Error("DOCX: update() is not supported for worker-backed packages");
+    }
+    load(path, type = "string") {
+        return this.client.loadResource(this.sessionId, normalizePath$1(path), type);
+    }
+    save(type = "blob") {
+        return this.client.save(this.sessionId, type);
+    }
+    async loadRelationships(path = null) {
+        let relsPath = `_rels/.rels`;
+        if (path != null) {
+            const [folder, fileName] = splitPath(path);
+            relsPath = `${folder}_rels/${fileName}.rels`;
+        }
+        const text = await this.load(relsPath, "string");
+        return text ? parseRelationships(this.parseXmlDocument(text).firstElementChild, this.xmlParser) : null;
+    }
+    parseXmlDocument(text) {
+        return parseXmlString(text, this.options.trimXmlDeclaration);
+    }
+    dispose() {
+        return this.client.dispose(this.sessionId);
+    }
+}
+function prepareWorkerOptions(options) {
+    return JSON.parse(JSON.stringify({
+        ...options,
+        workerUrl: undefined
+    }));
 }
 function resolveWorkerUrl(explicitUrl) {
     if (explicitUrl)
@@ -2269,7 +2410,7 @@ function resolveWorkerUrl(explicitUrl) {
     }
     return null;
 }
-async function toArrayBuffer(data) {
+async function toArrayBuffer$1(data) {
     if (data instanceof ArrayBuffer)
         return data;
     if (data instanceof Uint8Array)
@@ -2278,8 +2419,11 @@ async function toArrayBuffer(data) {
         return await data.arrayBuffer();
     throw new Error("Unsupported input type for parser worker");
 }
+function normalizePath$1(path) {
+    return path.startsWith("/") ? path.substring(1) : path;
+}
 
-const topLevelRels = [
+const topLevelRels$1 = [
     { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
     { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
     { type: RelationshipTypes.CoreProperties, target: "docProps/core.xml" },
@@ -2287,8 +2431,11 @@ const topLevelRels = [
 ];
 class WordDocument {
     constructor() {
+        this._objectUrls = new Set();
+        this._snapshotPages = null;
         this.parts = [];
         this.partsMap = {};
+        this.pages = null;
     }
     static async load(blob, parser, options) {
         var d = new WordDocument();
@@ -2296,10 +2443,10 @@ class WordDocument {
         d._parser = parser;
         if (options.useWorkerParser) {
             try {
-                const parsed = await parseDocumentInWorker(blob, options);
-                if (parsed) {
-                    d._package = OpenXmlPackage.fromFiles(fileEntriesToMap(parsed.files), options);
-                    d.applySerializedDocument(parsed);
+                const workerResult = await parseDocumentInWorker(blob, options);
+                if (workerResult) {
+                    d._package = workerResult.package;
+                    d.applySerializedDocument(workerResult.parsed);
                     return d;
                 }
             }
@@ -2311,15 +2458,32 @@ class WordDocument {
         }
         d._package = await OpenXmlPackage.load(blob, options);
         d.rels = await d._package.loadRelationships();
-        await Promise.all(topLevelRels.map(rel => {
+        await Promise.all(topLevelRels$1.map(rel => {
             const r = d.rels.find(x => x.type === rel.type) ?? rel;
             return d.loadRelationshipPart(r.target, r.type);
         }));
         return d;
     }
+    static fromSnapshot(snapshot, options) {
+        const document = new WordDocument();
+        document._options = options;
+        document._package = OpenXmlPackage.fromFiles(snapshotFilesToMap(snapshot.files), options);
+        document.applySerializedDocument({
+            sessionId: "snapshot",
+            rels: snapshot.rels,
+            parts: materializeSnapshotParts(snapshot.parts),
+            rolePaths: snapshot.rolePaths
+        });
+        document.pages = snapshot.pages;
+        document._snapshotPages = snapshot.pages;
+        return document;
+    }
+    preparePageForRender(page) {
+        return this._snapshotPages ? cloneSerializable$1(page) : page;
+    }
     applySerializedDocument(data) {
         this.rels = data.rels;
-        this.parts = data.parts.map(part => ({ ...part }));
+        this.parts = data.parts;
         this.partsMap = keyBy(this.parts, x => x.path);
         this.documentPart = data.rolePaths.documentPart ? this.partsMap[data.rolePaths.documentPart] : null;
         this.fontTablePart = data.rolePaths.fontTablePart ? this.partsMap[data.rolePaths.fontTablePart] : null;
@@ -2334,9 +2498,24 @@ class WordDocument {
         this.settingsPart = data.rolePaths.settingsPart ? this.partsMap[data.rolePaths.settingsPart] : null;
         this.commentsPart = data.rolePaths.commentsPart ? this.partsMap[data.rolePaths.commentsPart] : null;
         this.commentsExtendedPart = data.rolePaths.commentsExtendedPart ? this.partsMap[data.rolePaths.commentsExtendedPart] : null;
+        if (this.commentsPart?.comments && !this.commentsPart.commentMap) {
+            this.commentsPart.commentMap = keyBy(this.commentsPart.comments, x => x.id);
+        }
+        if (this.commentsExtendedPart?.comments && !this.commentsExtendedPart.commentMap) {
+            this.commentsExtendedPart.commentMap = keyBy(this.commentsExtendedPart.comments, x => x.paraId);
+        }
     }
     save(type = "blob") {
         return this._package.save(type);
+    }
+    async dispose() {
+        for (const url of this._objectUrls) {
+            URL.revokeObjectURL(url);
+        }
+        this._objectUrls.clear();
+        if (typeof this._package?.dispose === "function") {
+            await this._package.dispose();
+        }
     }
     async loadRelationshipPart(path, type) {
         if (this.partsMap[path])
@@ -2344,51 +2523,52 @@ class WordDocument {
         if (!this._package.get(path))
             return null;
         let part = null;
+        const pkg = this._package;
         switch (type) {
             case RelationshipTypes.OfficeDocument:
-                this.documentPart = part = new DocumentPart(this._package, path, this._parser);
+                this.documentPart = part = new DocumentPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.FontTable:
-                this.fontTablePart = part = new FontTablePart(this._package, path);
+                this.fontTablePart = part = new FontTablePart(pkg, path);
                 break;
             case RelationshipTypes.Numbering:
-                this.numberingPart = part = new NumberingPart(this._package, path, this._parser);
+                this.numberingPart = part = new NumberingPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.Styles:
-                this.stylesPart = part = new StylesPart(this._package, path, this._parser);
+                this.stylesPart = part = new StylesPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.Theme:
-                this.themePart = part = new ThemePart(this._package, path);
+                this.themePart = part = new ThemePart(pkg, path);
                 break;
             case RelationshipTypes.Footnotes:
-                this.footnotesPart = part = new FootnotesPart(this._package, path, this._parser);
+                this.footnotesPart = part = new FootnotesPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.Endnotes:
-                this.endnotesPart = part = new EndnotesPart(this._package, path, this._parser);
+                this.endnotesPart = part = new EndnotesPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.Footer:
-                part = new FooterPart(this._package, path, this._parser);
+                part = new FooterPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.Header:
-                part = new HeaderPart(this._package, path, this._parser);
+                part = new HeaderPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.CoreProperties:
-                this.corePropsPart = part = new CorePropsPart(this._package, path);
+                this.corePropsPart = part = new CorePropsPart(pkg, path);
                 break;
             case RelationshipTypes.ExtendedProperties:
-                this.extendedPropsPart = part = new ExtendedPropsPart(this._package, path);
+                this.extendedPropsPart = part = new ExtendedPropsPart(pkg, path);
                 break;
             case RelationshipTypes.CustomProperties:
-                part = new CustomPropsPart(this._package, path);
+                part = new CustomPropsPart(pkg, path);
                 break;
             case RelationshipTypes.Settings:
-                this.settingsPart = part = new SettingsPart(this._package, path);
+                this.settingsPart = part = new SettingsPart(pkg, path);
                 break;
             case RelationshipTypes.Comments:
-                this.commentsPart = part = new CommentsPart(this._package, path, this._parser);
+                this.commentsPart = part = new CommentsPart(pkg, path, this._parser);
                 break;
             case RelationshipTypes.CommentsExtended:
-                this.commentsExtendedPart = part = new CommentsExtendedPart(this._package, path);
+                this.commentsExtendedPart = part = new CommentsExtendedPart(pkg, path);
                 break;
         }
         if (part == null)
@@ -2423,7 +2603,9 @@ class WordDocument {
         if (this._options.useBase64URL) {
             return blobToBase64(blob);
         }
-        return URL.createObjectURL(blob);
+        const url = URL.createObjectURL(blob);
+        this._objectUrls.add(url);
+        return url;
     }
     findPartByRelId(id, basePart = null) {
         var rel = (basePart.rels ?? this.rels).find(r => r.id == id);
@@ -2440,13 +2622,6 @@ class WordDocument {
         return path ? this._package.load(path, outputType) : Promise.resolve(null);
     }
 }
-function fileEntriesToMap(files) {
-    const result = {};
-    for (const file of files) {
-        result[file.path] = new Uint8Array(file.buffer);
-    }
-    return result;
-}
 function deobfuscate(data, guidKey) {
     const len = 16;
     const trimmed = guidKey.replace(/{|}|-/g, "");
@@ -2456,6 +2631,48 @@ function deobfuscate(data, guidKey) {
     for (let i = 0; i < 32; i++)
         data[i] = data[i] ^ numbers[i % len];
     return data;
+}
+function snapshotFilesToMap(files) {
+    const result = {};
+    for (const file of files ?? []) {
+        result[file.path] = new Uint8Array(file.buffer);
+    }
+    return result;
+}
+function materializeSnapshotParts(parts) {
+    return (parts ?? []).map(part => {
+        const materialized = { ...part };
+        switch (part.kind) {
+            case "styles":
+                materialized.styles = cloneSerializable$1(part.styles);
+                break;
+            case "header":
+            case "footer":
+                materialized.rootElement = cloneSerializable$1(part.rootElement);
+                break;
+            case "footnotes":
+            case "endnotes":
+                materialized.notes = cloneSerializable$1(part.notes);
+                break;
+        }
+        return materialized;
+    });
+}
+function cloneSerializable$1(value) {
+    if (typeof structuredClone === "function") {
+        return structuredClone(value);
+    }
+    if (Array.isArray(value)) {
+        return value.map(item => cloneSerializable$1(item));
+    }
+    if (!value || typeof value !== "object") {
+        return value;
+    }
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+        result[key] = cloneSerializable$1(entry);
+    }
+    return result;
 }
 
 function parseBookmarkStart(elem, xml) {
@@ -5070,7 +5287,6 @@ class VirtualizedRenderer {
         fragment.appendChild(this.topSpacer);
         for (const item of virtualItems) {
             const element = this.elementCache.get(item.index) ?? this.options.renderItem(item.index);
-            element.dataset.index = `${item.index}`;
             nextCache.set(item.index, element);
             fragment.appendChild(element);
         }
@@ -5082,6 +5298,316 @@ class VirtualizedRenderer {
         this.elementCache = nextCache;
         this.options.onRendered?.();
     }
+    getMountedItems() {
+        return Array.from(this.elementCache.entries()).map(([index, element]) => ({ index, element }));
+    }
+    findMountedItem(index) {
+        return this.elementCache.get(index) ?? null;
+    }
+    scrollToIndex(index, options = {}) {
+        this.virtualizer.scrollToIndex(index, {
+            align: mapBlockToAlign(options.block),
+            behavior: options.behavior
+        });
+    }
+}
+function mapBlockToAlign(block) {
+    switch (block) {
+        case "center":
+            return "center";
+        case "end":
+            return "end";
+        case "nearest":
+            return "auto";
+        case "start":
+        default:
+            return "start";
+    }
+}
+
+class DocumentPager {
+    constructor(options, styleMap = {}) {
+        this.options = options;
+        this.styleMap = styleMap;
+    }
+    static createStyleMap(styles, options) {
+        const stylesMap = keyBy(styles.filter(x => x.id != null), x => x.id);
+        const className = options.className ?? "docx";
+        for (const style of styles.filter(x => x.basedOn)) {
+            const baseStyle = stylesMap[style.basedOn];
+            if (baseStyle) {
+                style.paragraphProps = mergeDeep(style.paragraphProps, baseStyle.paragraphProps);
+                style.runProps = mergeDeep(style.runProps, baseStyle.runProps);
+                for (const baseValues of baseStyle.styles) {
+                    const styleValues = style.styles.find(x => x.target == baseValues.target);
+                    if (styleValues) {
+                        copyStyleProperties(baseValues.values, styleValues.values);
+                    }
+                    else {
+                        style.styles.push({ ...baseValues, values: { ...baseValues.values } });
+                    }
+                }
+            }
+            else if (options.debug) {
+                console.warn(`Can't find base style ${style.basedOn}`);
+            }
+        }
+        for (const style of styles) {
+            style.cssName = processStyleName(className, style.id);
+        }
+        return stylesMap;
+    }
+    buildPages(document) {
+        const result = [];
+        const allEndnoteIds = [];
+        const sections = this.splitBySection(document.children, document.props);
+        const pages = this.groupByPageBreaks(sections);
+        let prevProps = null;
+        for (let i = 0, l = pages.length; i < l; i++) {
+            const pageSections = pages[i];
+            const pageProps = pageSections[0].sectProps;
+            let footerProps = pageProps;
+            const initialEndnoteIds = allEndnoteIds.slice();
+            for (const sect of pageSections) {
+                this.collectEndnoteIds(sect.elements, allEndnoteIds);
+                footerProps = sect.sectProps;
+            }
+            result.push({
+                pageIndex: i,
+                key: i,
+                sections: pageSections,
+                pageProps,
+                footerProps,
+                headerRefs: pageProps?.headerRefs,
+                footerRefs: footerProps?.footerRefs,
+                firstOfSection: prevProps != pageProps,
+                initialEndnoteIds,
+                estimatedHeight: this.estimatePageHeight(pageProps),
+                isLastPage: i == l - 1
+            });
+            prevProps = footerProps;
+        }
+        return result;
+    }
+    findStyle(styleName) {
+        return styleName && this.styleMap?.[styleName];
+    }
+    isPageBreakElement(elem) {
+        if (elem.type != DomType.Break)
+            return false;
+        if (elem.break == "lastRenderedPageBreak")
+            return !this.options.ignoreLastRenderedPageBreak;
+        return elem.break == "page";
+    }
+    isPageBreakSection(prev, next) {
+        if (!prev || !next)
+            return false;
+        return prev.pageSize?.orientation != next.pageSize?.orientation
+            || prev.pageSize?.width != next.pageSize?.width
+            || prev.pageSize?.height != next.pageSize?.height;
+    }
+    splitBySection(elements, defaultProps) {
+        let current = { sectProps: null, elements: [], pageBreak: false };
+        const result = [current];
+        for (const elem of elements) {
+            if (elem.type == DomType.Paragraph) {
+                const style = this.findStyle(elem.styleName);
+                if (style?.paragraphProps?.pageBreakBefore && current.elements.length > 0) {
+                    current.pageBreak = true;
+                    current = { sectProps: null, elements: [], pageBreak: false };
+                    result.push(current);
+                }
+            }
+            current.elements.push(elem);
+            if (elem.type != DomType.Paragraph)
+                continue;
+            const paragraph = elem;
+            const sectProps = paragraph.sectionProps;
+            let paragraphBreakIndex = -1;
+            let runBreakIndex = -1;
+            if (this.options.breakPages && paragraph.children) {
+                paragraphBreakIndex = paragraph.children.findIndex(run => {
+                    runBreakIndex = run.children?.findIndex(this.isPageBreakElement.bind(this)) ?? -1;
+                    return runBreakIndex != -1;
+                });
+            }
+            if (sectProps || paragraphBreakIndex != -1) {
+                current.sectProps = sectProps;
+                current.pageBreak = paragraphBreakIndex != -1;
+                current = { sectProps: null, elements: [], pageBreak: false };
+                result.push(current);
+            }
+            if (paragraphBreakIndex == -1)
+                continue;
+            const breakRun = paragraph.children[paragraphBreakIndex];
+            const splitRun = runBreakIndex < breakRun.children.length - 1;
+            if (paragraphBreakIndex < paragraph.children.length - 1 || splitRun) {
+                const children = elem.children;
+                const newParagraph = { ...elem, children: children.slice(paragraphBreakIndex) };
+                elem.children = children.slice(0, paragraphBreakIndex);
+                current.elements.push(newParagraph);
+                if (splitRun) {
+                    const runChildren = breakRun.children;
+                    const newRun = { ...breakRun, children: runChildren.slice(0, runBreakIndex) };
+                    elem.children.push(newRun);
+                    breakRun.children = runChildren.slice(runBreakIndex);
+                }
+            }
+        }
+        let currentSectProps = null;
+        for (let i = result.length - 1; i >= 0; i--) {
+            if (result[i].sectProps == null) {
+                result[i].sectProps = currentSectProps ?? defaultProps;
+            }
+            else {
+                currentSectProps = result[i].sectProps;
+            }
+        }
+        return this.coalesceEmptySections(this.resolveSectionProps(result));
+    }
+    resolveSectionProps(sections) {
+        let previous = null;
+        for (const section of sections) {
+            if (previous) {
+                section.sectProps = this.mergeSectionProps(previous, section.sectProps);
+            }
+            previous = section.sectProps;
+        }
+        return sections;
+    }
+    mergeSectionProps(base, override) {
+        if (!base)
+            return override;
+        if (!override)
+            return base;
+        if (base === override)
+            return base;
+        return {
+            ...base,
+            ...override,
+            type: override.type ?? base.type,
+            pageSize: override.pageSize ?? base.pageSize,
+            pageMargins: override.pageMargins ?? base.pageMargins,
+            pageBorders: override.pageBorders ?? base.pageBorders,
+            pageNumber: override.pageNumber ?? base.pageNumber,
+            columns: override.columns,
+            footerRefs: override.footerRefs ?? base.footerRefs,
+            headerRefs: override.headerRefs ?? base.headerRefs,
+            titlePage: override.titlePage ?? base.titlePage,
+        };
+    }
+    coalesceEmptySections(sections) {
+        const result = [];
+        for (let i = 0; i < sections.length; i++) {
+            const section = sections[i];
+            const next = sections[i + 1];
+            if (next && !section.pageBreak && !this.sectionHasVisibleContent(section) && !this.sectionForcesStandalonePage(section)) {
+                next.elements = [...section.elements, ...next.elements];
+                next.sectProps = this.mergeSectionProps(section.sectProps, next.sectProps);
+                next.pageBreak = section.pageBreak || next.pageBreak;
+                continue;
+            }
+            result.push(section);
+        }
+        return result;
+    }
+    sectionForcesStandalonePage(section) {
+        switch (section.sectProps?.type) {
+            case SectionType.EvenPage:
+            case SectionType.OddPage:
+                return true;
+            default:
+                return false;
+        }
+    }
+    sectionHasVisibleContent(section) {
+        return section.elements?.some(element => this.elementHasVisibleContent(element)) ?? false;
+    }
+    elementHasVisibleContent(element) {
+        if (!element)
+            return false;
+        switch (element.type) {
+            case DomType.Text:
+            case DomType.DeletedText:
+                return !!element.text?.trim();
+            case DomType.Image:
+            case DomType.Drawing:
+            case DomType.Table:
+            case DomType.Symbol:
+            case DomType.Tab:
+            case DomType.NoBreakHyphen:
+            case DomType.FootnoteReference:
+            case DomType.EndnoteReference:
+            case DomType.CommentReference:
+            case DomType.AltChunk:
+                return true;
+        }
+        return element.children?.some(child => this.elementHasVisibleContent(child)) ?? false;
+    }
+    groupByPageBreaks(sections) {
+        let current = [];
+        let prev;
+        const result = [current];
+        for (const section of sections) {
+            current.push(section);
+            if (this.options.ignoreLastRenderedPageBreak || section.pageBreak || this.isPageBreakSection(prev, section.sectProps)) {
+                result.push(current = []);
+            }
+            prev = section.sectProps;
+        }
+        return result.filter(x => x.length > 0);
+    }
+    collectEndnoteIds(elements, output) {
+        if (!elements)
+            return;
+        for (const element of elements) {
+            if (element.type == DomType.EndnoteReference) {
+                output.push(element.id);
+            }
+            if (element.children?.length) {
+                this.collectEndnoteIds(element.children, output);
+            }
+        }
+    }
+    estimatePageHeight(props) {
+        const defaultPageHeight = 1122;
+        const pageHeight = parseSizeToPixels$1(props?.pageSize?.height) ?? defaultPageHeight;
+        return pageHeight + (this.options.inWrapper ? 30 : 0);
+    }
+}
+function processStyleName(className, styleName) {
+    return styleName ? `${className}_${escapeClassName(styleName)}` : className;
+}
+function copyStyleProperties(input, output, attrs = null) {
+    if (!input)
+        return output;
+    if (output == null) {
+        output = {};
+    }
+    if (attrs == null) {
+        attrs = Object.getOwnPropertyNames(input);
+    }
+    for (const key of attrs) {
+        if (input.hasOwnProperty(key) && !output.hasOwnProperty(key)) {
+            output[key] = input[key];
+        }
+    }
+    return output;
+}
+function parseSizeToPixels$1(value) {
+    if (!value)
+        return null;
+    if (value.endsWith("px"))
+        return parseFloat(value);
+    if (value.endsWith("pt"))
+        return parseFloat(value) * (96 / 72);
+    if (value.endsWith("cm"))
+        return parseFloat(value) * (96 / 2.54);
+    if (value.endsWith("mm"))
+        return parseFloat(value) * (96 / 25.4);
+    if (value.endsWith("in"))
+        return parseFloat(value) * 96;
+    return parseFloat(value);
 }
 
 const ns = {
@@ -5159,7 +5685,7 @@ class HtmlRenderer {
         }
         if (!options.ignoreFonts && document.fontTablePart)
             this.renderFontTable(document.fontTablePart, styleContainer);
-        const pages = this.buildPages(document.documentPart.body);
+        const pages = document.pages ?? new DocumentPager(this.options, this.styleMap).buildPages(document.documentPart.body);
         const scrollElement = this.resolveVirtualScrollElement(bodyContainer, pages);
         let bodyHost = bodyContainer;
         if (scrollElement) {
@@ -5178,7 +5704,7 @@ class HtmlRenderer {
                     estimatedSize: page.estimatedHeight
                 })),
                 overscan: this.options.virtualizePagesOverscan,
-                renderItem: index => this.renderPage(pages[index], document.documentPart.body),
+                renderItem: index => this.renderPage(document.preparePageForRender(pages[index]), document.documentPart.body),
                 onRendered: () => {
                     this.flushPostRenderTasks();
                     this.refreshTabStops();
@@ -5187,7 +5713,7 @@ class HtmlRenderer {
             this.pageVirtualizer.mount();
         }
         else {
-            var sectionElements = pages.map(page => this.renderPage(page, document.documentPart.body));
+            var sectionElements = pages.map(page => this.renderPage(document.preparePageForRender(page), document.documentPart.body));
             bodyHost.dataset.docxPageCount = `${pages.length}`;
             if (this.options.inWrapper) {
                 bodyContainer.appendChild(this.renderWrapper(sectionElements));
@@ -5202,6 +5728,7 @@ class HtmlRenderer {
         this.flushPostRenderTasks();
         await Promise.allSettled(this.tasks);
         this.refreshTabStops();
+        return this.createRenderHandle(document, bodyContainer, styleContainer, bodyHost, pages);
     }
     renderTheme(themePart, styleContainer) {
         const variables = {};
@@ -5248,29 +5775,7 @@ class HtmlRenderer {
         return className ? `${this.className}_${escapeClassName(className)}` : this.className;
     }
     processStyles(styles) {
-        const stylesMap = keyBy(styles.filter(x => x.id != null), x => x.id);
-        for (const style of styles.filter(x => x.basedOn)) {
-            var baseStyle = stylesMap[style.basedOn];
-            if (baseStyle) {
-                style.paragraphProps = mergeDeep(style.paragraphProps, baseStyle.paragraphProps);
-                style.runProps = mergeDeep(style.runProps, baseStyle.runProps);
-                for (const baseValues of baseStyle.styles) {
-                    const styleValues = style.styles.find(x => x.target == baseValues.target);
-                    if (styleValues) {
-                        this.copyStyleProperties(baseValues.values, styleValues.values);
-                    }
-                    else {
-                        style.styles.push({ ...baseValues, values: { ...baseValues.values } });
-                    }
-                }
-            }
-            else if (this.options.debug)
-                console.warn(`Can't find base style ${style.basedOn}`);
-        }
-        for (let style of styles) {
-            style.cssName = this.processStyleName(style.id);
-        }
-        return stylesMap;
+        return DocumentPager.createStyleMap(styles, this.options);
     }
     prodessNumberings(numberings) {
         for (let num of numberings.filter(n => n.pStyleName)) {
@@ -5300,7 +5805,17 @@ class HtmlRenderer {
                     "border-left", "border-right", "border-top", "border-bottom",
                     "padding-left", "padding-right", "padding-top", "padding-bottom"
                 ]);
+                this.inheritTableCellPadding(table.cellStyle, c.cssStyle);
                 this.processElement(c);
+            }
+        }
+    }
+    inheritTableCellPadding(input, output) {
+        if (!input || !output)
+            return;
+        for (const key of ["padding-left", "padding-right", "padding-top", "padding-bottom"]) {
+            if (input[key] != null && shouldInheritPadding(output[key])) {
+                output[key] = input[key];
             }
         }
     }
@@ -5312,7 +5827,7 @@ class HtmlRenderer {
         if (attrs == null)
             attrs = Object.getOwnPropertyNames(input);
         for (var key of attrs) {
-            if (input.hasOwnProperty(key) && !output.hasOwnProperty(key))
+            if (input.hasOwnProperty(key) && (!output.hasOwnProperty(key) || output[key] == null || output[key] === ""))
                 output[key] = input[key];
         }
         return output;
@@ -5347,44 +5862,25 @@ class HtmlRenderer {
         return elem;
     }
     buildPages(document) {
-        const result = [];
-        const allEndnoteIds = [];
-        this.processElement(document);
-        const sections = this.splitBySection(document.children, document.props);
-        const pages = this.groupByPageBreaks(sections);
-        let prevProps = null;
-        for (let i = 0, l = pages.length; i < l; i++) {
-            const pageSections = pages[i];
-            const pageProps = pageSections[0].sectProps;
-            let footerProps = pageProps;
-            const initialEndnoteIds = allEndnoteIds.slice();
-            for (const sect of pageSections) {
-                this.collectEndnoteIds(sect.elements, allEndnoteIds);
-                footerProps = sect.sectProps;
-            }
-            result.push({
-                index: i,
-                key: i,
-                sections: pageSections,
-                pageProps,
-                footerProps,
-                firstOfSection: prevProps != pageProps,
-                initialEndnoteIds,
-                estimatedHeight: this.estimatePageHeight(pageProps),
-                isLastPage: i == l - 1
-            });
-            prevProps = footerProps;
-        }
-        return result;
+        return new DocumentPager(this.options, this.styleMap).buildPages(document);
     }
     renderPage(page, document) {
         this.currentFootnoteIds = [];
         this.currentEndnoteIds = page.initialEndnoteIds.slice();
         const pageElement = this.createPageElement(this.className, page.pageProps);
+        pageElement.dataset.index = `${page.pageIndex}`;
         this.renderStyleValues(document.cssStyle, pageElement);
-        this.options.renderHeaders && this.renderHeaderFooter(page.pageProps.headerRefs, page.pageProps, page.index, page.firstOfSection, pageElement);
+        this.options.renderHeaders && this.renderHeaderFooter(page.pageProps.headerRefs, page.pageProps, page.pageIndex, page.firstOfSection, pageElement);
         for (const sect of page.sections) {
             const contentElement = this.createSectionContent(sect.sectProps);
+            sect.elements.forEach(element => {
+                if (element.type == DomType.Table) {
+                    this.processTable(element);
+                }
+                else {
+                    this.processElement(element);
+                }
+            });
             if (this.options.mergeAdjacent) {
                 sect.elements.forEach(element => this.ensureOptimizedTree(element));
             }
@@ -5398,7 +5894,7 @@ class HtmlRenderer {
         if (this.options.renderEndnotes && page.isLastPage) {
             this.renderNotes(this.currentEndnoteIds, this.endnoteMap, pageElement);
         }
-        this.options.renderFooters && this.renderHeaderFooter(page.footerProps.footerRefs, page.footerProps, page.index, page.firstOfSection, pageElement);
+        this.options.renderFooters && this.renderHeaderFooter(page.footerProps.footerRefs, page.footerProps, page.pageIndex, page.firstOfSection, pageElement);
         return pageElement;
     }
     renderHeaderFooter(refs, props, page, firstOfSection, into) {
@@ -5838,7 +6334,7 @@ section.${c}>footer { z-index: 1; }
     renderElements(elems, into) {
         if (elems == null)
             return null;
-        var result = elems.flatMap(e => this.renderElement(e)).filter(e => e != null);
+        var result = elems.flatMap(e => e ? this.renderElement(e) : null).filter(e => e != null);
         if (into)
             appendChildren(into, result);
         return result;
@@ -6569,6 +7065,63 @@ section.${c}>footer { z-index: 1; }
             return null;
         return findScrollableElement(bodyContainer, this.htmlDocument);
     }
+    createRenderHandle(document, bodyContainer, styleContainer, bodyHost, pages) {
+        const pageIndexMap = new Map(pages.map((page, index) => [page.pageIndex, index]));
+        return {
+            destroy: () => {
+                if (this.commentHighlight && this.options.renderComments) {
+                    CSS.highlights.delete(`${this.className}-comments`);
+                }
+                this.pageVirtualizer?.destroy();
+                this.pageVirtualizer = null;
+                removeAllElements(bodyContainer);
+                if (styleContainer && styleContainer !== bodyContainer) {
+                    removeAllElements(styleContainer);
+                }
+                void document.dispose();
+            },
+            getMountedPages: () => {
+                if (this.pageVirtualizer) {
+                    return this.pageVirtualizer.getMountedItems().map(item => ({
+                        pageIndex: pages[item.index].pageIndex,
+                        element: item.element
+                    }));
+                }
+                return this.getStaticMountedPages(bodyHost);
+            },
+            findMountedPage: (pageIndex) => {
+                if (this.pageVirtualizer) {
+                    const virtualIndex = pageIndexMap.get(pageIndex);
+                    return virtualIndex == null ? null : this.pageVirtualizer.findMountedItem(virtualIndex);
+                }
+                return bodyHost.querySelector(`section.${this.className}[data-index="${pageIndex}"]`);
+            },
+            scrollToPage: (pageIndex, options = {}) => {
+                const virtualIndex = pageIndexMap.get(pageIndex);
+                if (virtualIndex == null) {
+                    return false;
+                }
+                if (this.pageVirtualizer) {
+                    this.pageVirtualizer.scrollToIndex(virtualIndex, options);
+                    return true;
+                }
+                const page = bodyHost.querySelector(`section.${this.className}[data-index="${pageIndex}"]`);
+                if (!page) {
+                    return false;
+                }
+                page.scrollIntoView(options);
+                return true;
+            }
+        };
+    }
+    getStaticMountedPages(bodyHost) {
+        return Array
+            .from(bodyHost.querySelectorAll(`section.${this.className}[data-index]`))
+            .map(element => ({
+            pageIndex: Number(element.dataset.index),
+            element: element
+        }));
+    }
     collectEndnoteIds(elements, output) {
         if (!elements)
             return;
@@ -6637,7 +7190,8 @@ function removeAllElements(elem) {
     elem.innerHTML = '';
 }
 function appendChildren(elem, children) {
-    children.forEach(c => elem.appendChild(isString(c) ? document.createTextNode(c) : c));
+    const ownerDocument = elem.ownerDocument ?? document;
+    children.forEach(c => elem.appendChild(isString(c) ? ownerDocument.createTextNode(c) : c));
 }
 function findParent(elem, type) {
     var parent = elem.parent;
@@ -6676,6 +7230,11 @@ function parseSizeToPixels(value) {
         case "q": return amount * 96 / 101.6;
         default: return amount;
     }
+}
+function shouldInheritPadding(value) {
+    if (value == null || value === "")
+        return true;
+    return /^0(?:\.0+)?(?:px|pt|pc|in|cm|mm|q)?$/i.test(value.trim());
 }
 const simpleInlineChildTypes = new Set([
     DomType.Text,
@@ -6720,13 +7279,806 @@ const defaultOptions = {
     useWorkerParser: false,
     mergeAdjacent: false
 };
+
+// ==ClosureCompiler==
+// @output_file_name default.js
+// @compilation_level SIMPLE_OPTIMIZATIONS
+// ==/ClosureCompiler==
+// module.exports = {
+//     parse: parse,
+//     simplify: simplify,
+//     simplifyLostLess: simplifyLostLess,
+//     filter: filter,
+//     stringify: stringify,
+//     toContentString: toContentString,
+//     getElementById: getElementById,
+//     getElementsByClassName: getElementsByClassName,
+//     transformStream: transformStream,
+// };
+
+/**
+ * @author: Tobias Nickel
+ * @created: 06.04.2015
+ * I needed a small xmlparser chat can be used in a worker.
+ */
+
+/**
+ * @typedef tNode 
+ * @property {string} tagName 
+ * @property {object} attributes
+ * @property {(tNode|string)[]} children 
+ **/
+
+/**
+ * @typedef TParseOptions
+ * @property {number} [pos]
+ * @property {string[]} [noChildNodes]
+ * @property {boolean} [setPos]
+ * @property {boolean} [keepComments] 
+ * @property {boolean} [keepWhitespace]
+ * @property {boolean} [simplify]
+ * @property {(a: tNode, b: tNode) => boolean} [filter]
+ */
+
+/**
+ * parseXML / html into a DOM Object. with no validation and some failur tolerance
+ * @param {string} S your XML to parse
+ * @param {TParseOptions} [options]  all other options:
+ * @return {(tNode | string)[]}
+ */
+function parse(S, options) {
+    "txml";
+    options = options || {};
+
+    var pos = options.pos || 0;
+    var keepComments = !!options.keepComments;
+    var keepWhitespace = !!options.keepWhitespace;
+
+    var openBracket = "<";
+    var openBracketCC = "<".charCodeAt(0);
+    var closeBracket = ">";
+    var closeBracketCC = ">".charCodeAt(0);
+    var minusCC = "-".charCodeAt(0);
+    var slashCC = "/".charCodeAt(0);
+    var exclamationCC = '!'.charCodeAt(0);
+    var singleQuoteCC = "'".charCodeAt(0);
+    var doubleQuoteCC = '"'.charCodeAt(0);
+    var openCornerBracketCC = '['.charCodeAt(0);
+    var closeCornerBracketCC = ']'.charCodeAt(0);
+
+
+    /**
+     * parsing a list of entries
+     */
+    function parseChildren(tagName) {
+        var children = [];
+        while (S[pos]) {
+            if (S.charCodeAt(pos) == openBracketCC) {
+                if (S.charCodeAt(pos + 1) === slashCC) {
+                    var closeStart = pos + 2;
+                    pos = S.indexOf(closeBracket, pos);
+
+                    var closeTag = S.substring(closeStart, pos);
+                    if (closeTag.indexOf(tagName) == -1) {
+                        var parsedText = S.substring(0, pos).split('\n');
+                        throw new Error(
+                            'Unexpected close tag\nLine: ' + (parsedText.length - 1) +
+                            '\nColumn: ' + (parsedText[parsedText.length - 1].length + 1) +
+                            '\nChar: ' + S[pos]
+                        );
+                    }
+
+                    if (pos + 1) pos += 1;
+
+                    return children;
+                } else if (S.charCodeAt(pos + 1) === exclamationCC) {
+                    if (S.charCodeAt(pos + 2) == minusCC) {
+                        //comment support
+                        const startCommentPos = pos;
+                        while (pos !== -1 && !(S.charCodeAt(pos) === closeBracketCC && S.charCodeAt(pos - 1) == minusCC && S.charCodeAt(pos - 2) == minusCC && pos != -1)) {
+                            pos = S.indexOf(closeBracket, pos + 1);
+                        }
+                        if (pos === -1) {
+                            pos = S.length;
+                        }
+                        if (keepComments) {
+                            children.push(S.substring(startCommentPos, pos + 1));
+                        }
+                    } else if (
+                        S.charCodeAt(pos + 2) === openCornerBracketCC &&
+                        S.charCodeAt(pos + 8) === openCornerBracketCC &&
+                        S.substr(pos + 3, 5).toLowerCase() === 'cdata'
+                    ) {
+                        // cdata
+                        var cdataEndIndex = S.indexOf(']]>', pos);
+                        if (cdataEndIndex == -1) {
+                            children.push(S.substr(pos + 9));
+                            pos = S.length;
+                        } else {
+                            children.push(S.substring(pos + 9, cdataEndIndex));
+                            pos = cdataEndIndex + 3;
+                        }
+                        continue;
+                    } else {
+                        // doctypesupport
+                        const startDoctype = pos + 1;
+                        pos += 2;
+                        var encapsuled = false;
+                        while ((S.charCodeAt(pos) !== closeBracketCC || encapsuled === true) && S[pos]) {
+                            if (S.charCodeAt(pos) === openCornerBracketCC) {
+                                encapsuled = true;
+                            } else if (encapsuled === true && S.charCodeAt(pos) === closeCornerBracketCC) {
+                                encapsuled = false;
+                            }
+                            pos++;
+                        }
+                        children.push(S.substring(startDoctype, pos));
+                    }
+                    pos++;
+                    continue;
+                }
+                var node = parseNode();
+                children.push(node);
+                if (node.tagName[0] === '?') {
+                    children.push(...node.children);
+                    node.children = [];
+                }
+            } else {
+                var text = parseText();
+                if (keepWhitespace) {
+                    if (text.length > 0) {
+                        children.push(text);
+                    }
+                } else {
+                    var trimmed = text.trim();
+                    if (trimmed.length > 0) {
+                        children.push(trimmed);
+                    }
+                }
+                pos++;
+            }
+        }
+        return children;
+    }
+
+    /**
+     *    returns the text outside of texts until the first '<'
+     */
+    function parseText() {
+        var start = pos;
+        pos = S.indexOf(openBracket, pos) - 1;
+        if (pos === -2)
+            pos = S.length;
+        return S.slice(start, pos + 1);
+    }
+    /**
+     *    returns text until the first nonAlphabetic letter
+     */
+    var nameSpacer = '\r\n\t>/= ';
+
+    function parseName() {
+        var start = pos;
+        while (nameSpacer.indexOf(S[pos]) === -1 && S[pos]) {
+            pos++;
+        }
+        return S.slice(start, pos);
+    }
+    /**
+     *    is parsing a node, including tagName, Attributes and its children,
+     * to parse children it uses the parseChildren again, that makes the parsing recursive
+     */
+    var NoChildNodes = options.noChildNodes || ['img', 'br', 'input', 'meta', 'link', 'hr'];
+
+    function parseNode() {
+        pos++;
+        const tagName = parseName();
+        const attributes = {};
+        let children = [];
+
+        // parsing attributes
+        while (S.charCodeAt(pos) !== closeBracketCC && S[pos]) {
+            var c = S.charCodeAt(pos);
+            if ((c > 64 && c < 91) || (c > 96 && c < 123)) {
+                //if('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'.indexOf(S[pos])!==-1 ){
+                var name = parseName();
+                // search beginning of the string
+                var code = S.charCodeAt(pos);
+                while (code && code !== singleQuoteCC && code !== doubleQuoteCC && !((code > 64 && code < 91) || (code > 96 && code < 123)) && code !== closeBracketCC) {
+                    pos++;
+                    code = S.charCodeAt(pos);
+                }
+                if (code === singleQuoteCC || code === doubleQuoteCC) {
+                    var value = parseString();
+                    if (pos === -1) {
+                        return {
+                            tagName,
+                            attributes,
+                            children,
+                        };
+                    }
+                } else {
+                    value = null;
+                    pos--;
+                }
+                attributes[name] = value;
+            }
+            pos++;
+        }
+        // optional parsing of children
+        if (S.charCodeAt(pos - 1) !== slashCC) {
+            if (tagName == "script") {
+                var start = pos + 1;
+                pos = S.indexOf('</script>', pos);
+                children = [S.slice(start, pos)];
+                pos += 9;
+            } else if (tagName == "style") {
+                var start = pos + 1;
+                pos = S.indexOf('</style>', pos);
+                children = [S.slice(start, pos)];
+                pos += 8;
+            } else if (NoChildNodes.indexOf(tagName) === -1) {
+                pos++;
+                children = parseChildren(tagName);
+            } else {
+                pos++;
+            }
+        } else {
+            pos++;
+        }
+        return {
+            tagName,
+            attributes,
+            children,
+        };
+    }
+
+    /**
+     *    is parsing a string, that starts with a char and with the same usually  ' or "
+     */
+
+    function parseString() {
+        var startChar = S[pos];
+        var startpos = pos + 1;
+        pos = S.indexOf(startChar, startpos);
+        return S.slice(startpos, pos);
+    }
+
+    /**
+     *
+     */
+    function findElements() {
+        var r = new RegExp('\\s' + options.attrName + '\\s*=[\'"]' + options.attrValue + '[\'"]').exec(S);
+        if (r) {
+            return r.index;
+        } else {
+            return -1;
+        }
+    }
+
+    var out = null;
+    if (options.attrValue !== undefined) {
+        options.attrName = options.attrName || 'id';
+        var out = [];
+
+        while ((pos = findElements()) !== -1) {
+            pos = S.lastIndexOf('<', pos);
+            if (pos !== -1) {
+                out.push(parseNode());
+            }
+            S = S.substr(pos);
+            pos = 0;
+        }
+    } else if (options.parseNode) {
+        out = parseNode();
+    } else {
+        out = parseChildren('');
+    }
+
+    if (options.filter) {
+        out = filter(out, options.filter);
+    }
+
+    if (options.simplify) {
+        return simplify(Array.isArray(out) ? out : [out]);
+    }
+
+    if (options.setPos) {
+        out.pos = pos;
+    }
+
+    return out;
+}
+
+/**
+ * transform the DomObject to an object that is like the object of PHP`s simple_xmp_load_*() methods.
+ * this format helps you to write that is more likely to keep your program working, even if there a small changes in the XML schema.
+ * be aware, that it is not possible to reproduce the original xml from a simplified version, because the order of elements is not saved.
+ * therefore your program will be more flexible and easier to read.
+ *
+ * @param {tNode[]} children the childrenList
+ */
+function simplify(children) {
+    var out = {};
+    if (!children.length) {
+        return '';
+    }
+
+    if (children.length === 1 && typeof children[0] == 'string') {
+        return children[0];
+    }
+    // map each object
+    children.forEach(function(child) {
+        if (typeof child !== 'object') {
+            return;
+        }
+        if (!out[child.tagName])
+            out[child.tagName] = [];
+        var kids = simplify(child.children);
+        out[child.tagName].push(kids);
+        if (Object.keys(child.attributes).length && typeof kids !== 'string') {
+            kids._attributes = child.attributes;
+        }
+    });
+
+    for (var i in out) {
+        if (out[i].length == 1) {
+            out[i] = out[i][0];
+        }
+    }
+
+    return out;
+}
+/**
+ * behaves the same way as Array.filter, if the filter method return true, the element is in the resultList
+ * @params children{Array} the children of a node
+ * @param f{function} the filter method
+ */
+function filter(children, f, dept = 0, path = '') {
+    var out = [];
+    children.forEach(function(child, i) {
+        if (typeof(child) === 'object' && f(child, i, dept, path)) out.push(child);
+        if (child.children) {
+            var kids = filter(child.children, f, dept + 1, (path ? path + '.' : '') + i + '.' + child.tagName);
+            out = out.concat(kids);
+        }
+    });
+    return out;
+}
+
+function removeUTF8BOM(data) {
+    return data.charCodeAt(0) === 0xFEFF ? data.substring(1) : data;
+}
+class TxmlTextNode {
+    constructor(textContent) {
+        this.textContent = textContent;
+        this.nodeType = 3;
+        this.nodeName = "#text";
+        this.localName = null;
+        this.namespaceURI = null;
+        this.childNodes = [];
+        this.firstChild = null;
+        this.firstElementChild = null;
+    }
+}
+class TxmlElementNode {
+    constructor(nodeName, attributes, children, namespaceMap) {
+        this.nodeName = nodeName;
+        this.namespaceMap = namespaceMap;
+        this.nodeType = 1;
+        this.firstChild = null;
+        this.firstElementChild = null;
+        const prefix = nodeName.includes(":") ? nodeName.split(":")[0] : "";
+        this.localName = nodeName.split(":").pop();
+        this.namespaceURI = namespaceMap[prefix] ?? null;
+        this.attributes = Object.entries(attributes ?? {}).map(([name, value]) => ({
+            name,
+            localName: name.split(":").pop(),
+            value
+        }));
+        this.childNodes = children;
+        this.firstChild = children[0] ?? null;
+        this.firstElementChild = children.find((child) => child.nodeType == 1) ?? null;
+    }
+    get textContent() {
+        return this.childNodes.map(child => child.textContent ?? "").join("");
+    }
+    lookupNamespaceURI(prefix) {
+        return this.namespaceMap[prefix ?? ""] ?? null;
+    }
+}
+class TxmlDocumentNode {
+    constructor(childNodes) {
+        this.childNodes = childNodes;
+        this.firstChild = null;
+        this.firstElementChild = null;
+        this.firstChild = childNodes[0] ?? null;
+        this.firstElementChild = childNodes.find((child) => child.nodeType == 1) ?? null;
+    }
+}
+function parseXmlStringWithTxml(xmlString, trimXmlDeclaration = false) {
+    if (trimXmlDeclaration)
+        xmlString = xmlString.replace(/<[?].*[?]>/, "");
+    xmlString = removeUTF8BOM(xmlString);
+    const parsed = parse(xmlString, { keepWhitespace: true });
+    return new TxmlDocumentNode(adaptChildren(parsed));
+}
+function adaptChildren(children, namespaceMap = {}) {
+    return (children ?? []).map(child => adaptNode(child, namespaceMap));
+}
+function adaptNode(node, namespaceMap) {
+    if (typeof node === "string") {
+        return new TxmlTextNode(node);
+    }
+    const currentNamespaceMap = { ...namespaceMap, ...extractNamespaceMap(node.attributes) };
+    return new TxmlElementNode(node.tagName, node.attributes, adaptChildren(node.children, currentNamespaceMap), currentNamespaceMap);
+}
+function extractNamespaceMap(attributes) {
+    const result = {};
+    for (const [name, value] of Object.entries(attributes ?? {})) {
+        if (name === "xmlns") {
+            result[""] = value;
+        }
+        else if (name.startsWith("xmlns:")) {
+            result[name.substring(6)] = value;
+        }
+    }
+    return result;
+}
+
+const topLevelRels = [
+    { type: RelationshipTypes.OfficeDocument, target: "word/document.xml" },
+    { type: RelationshipTypes.ExtendedProperties, target: "docProps/app.xml" },
+    { type: RelationshipTypes.CoreProperties, target: "docProps/core.xml" },
+    { type: RelationshipTypes.CustomProperties, target: "docProps/custom.xml" },
+];
+async function parseToSnapshot(data, options) {
+    const normalized = normalizeParseOptions(options);
+    const builder = new SnapshotBuilder(normalized);
+    return await builder.build(data);
+}
+function collectSnapshotTransferables(snapshot) {
+    return (snapshot.files ?? []).map(file => file.buffer);
+}
+async function renderSnapshot(snapshot, bodyContainer, styleContainer, options) {
+    validateSnapshot(snapshot);
+    const normalized = normalizeRenderOptions(options);
+    validateRenderOptions(snapshot, normalized);
+    const document = WordDocument.fromSnapshot(snapshot, normalized);
+    const renderer = new HtmlRenderer(bodyContainer.ownerDocument ?? window.document);
+    return await renderer.render(document, bodyContainer, styleContainer, normalized);
+}
+class SnapshotOpenXmlPackage {
+    constructor(files, options) {
+        this.files = files;
+        this.options = options;
+        this.xmlParser = new XmlParser();
+        this.decoder = new TextDecoder();
+    }
+    get(path) {
+        const normalized = normalizePath(path);
+        return this.files[normalized] ?? this.files[normalized.replace(/\//g, "\\")] ?? null;
+    }
+    async load(path, type = "string") {
+        const file = this.get(path);
+        if (!file)
+            return null;
+        switch (type) {
+            case "uint8array":
+                return file.slice();
+            case "arraybuffer":
+                return toArrayBuffer(file);
+            case "blob":
+                return new Blob([file.slice()]);
+            case "string":
+            default:
+                return this.decoder.decode(file);
+        }
+    }
+    async loadRelationships(path = null) {
+        let relsPath = `_rels/.rels`;
+        if (path != null) {
+            const [folder, fileName] = splitPath(path);
+            relsPath = `${folder}_rels/${fileName}.rels`;
+        }
+        const text = await this.load(relsPath, "string");
+        return text ? parseRelationships(this.parseXmlDocument(text).firstElementChild, this.xmlParser) : null;
+    }
+    parseXmlDocument(text) {
+        return parseXmlStringWithTxml(text, this.options.trimXmlDeclaration);
+    }
+}
+class SnapshotBuilder {
+    constructor(options) {
+        this.options = options;
+        this.rels = [];
+        this.parts = [];
+        this.partsMap = {};
+        this.rolePaths = {};
+        this.documentPart = null;
+        this.stylesPart = null;
+        this.parser = new DocumentParser(options);
+    }
+    async build(data) {
+        const files = unzipSync(await inputToUint8Array(data));
+        this.package = new SnapshotOpenXmlPackage(normalizeFiles(files), this.options);
+        this.rels = await this.package.loadRelationships();
+        await Promise.all(topLevelRels.map(rel => {
+            const relationship = this.rels.find(x => x.type === rel.type) ?? rel;
+            return this.loadRelationshipPart(relationship.target, relationship.type);
+        }));
+        const pagerOptions = {
+            breakPages: this.options.breakPages,
+            className: defaultOptions.className,
+            debug: this.options.debug,
+            ignoreLastRenderedPageBreak: this.options.ignoreLastRenderedPageBreak,
+            inWrapper: this.options.inWrapper
+        };
+        const styleMap = this.stylesPart?.styles
+            ? DocumentPager.createStyleMap(cloneSerializable(this.stylesPart.styles), pagerOptions)
+            : {};
+        const pages = new DocumentPager(pagerOptions, styleMap).buildPages(this.documentPart.body);
+        return {
+            meta: {
+                version: 1,
+                pageCount: pages.length,
+                parseOptions: this.options
+            },
+            files: this.collectSnapshotFiles(),
+            rels: this.rels,
+            parts: this.parts.map(part => this.serializePart(part)).filter(Boolean),
+            rolePaths: this.rolePaths,
+            pages
+        };
+    }
+    async loadRelationshipPart(path, type) {
+        const normalizedPath = normalizePath(path);
+        if (this.partsMap[normalizedPath])
+            return this.partsMap[normalizedPath];
+        if (!this.package.get(normalizedPath))
+            return null;
+        let part = null;
+        let partKind = null;
+        switch (type) {
+            case RelationshipTypes.OfficeDocument:
+                this.documentPart = part = new DocumentPart(this.package, normalizedPath, this.parser);
+                partKind = "document";
+                this.rolePaths.documentPart = normalizedPath;
+                break;
+            case RelationshipTypes.FontTable:
+                part = new FontTablePart(this.package, normalizedPath);
+                partKind = "fontTable";
+                this.rolePaths.fontTablePart = normalizedPath;
+                break;
+            case RelationshipTypes.Numbering:
+                part = new NumberingPart(this.package, normalizedPath, this.parser);
+                partKind = "numbering";
+                this.rolePaths.numberingPart = normalizedPath;
+                break;
+            case RelationshipTypes.Styles:
+                this.stylesPart = part = new StylesPart(this.package, normalizedPath, this.parser);
+                partKind = "styles";
+                this.rolePaths.stylesPart = normalizedPath;
+                break;
+            case RelationshipTypes.Theme:
+                part = new ThemePart(this.package, normalizedPath);
+                partKind = "theme";
+                this.rolePaths.themePart = normalizedPath;
+                break;
+            case RelationshipTypes.Footnotes:
+                part = new FootnotesPart(this.package, normalizedPath, this.parser);
+                partKind = "footnotes";
+                this.rolePaths.footnotesPart = normalizedPath;
+                break;
+            case RelationshipTypes.Endnotes:
+                part = new EndnotesPart(this.package, normalizedPath, this.parser);
+                partKind = "endnotes";
+                this.rolePaths.endnotesPart = normalizedPath;
+                break;
+            case RelationshipTypes.Footer:
+                part = new FooterPart(this.package, normalizedPath, this.parser);
+                partKind = "footer";
+                break;
+            case RelationshipTypes.Header:
+                part = new HeaderPart(this.package, normalizedPath, this.parser);
+                partKind = "header";
+                break;
+            case RelationshipTypes.CoreProperties:
+                part = new CorePropsPart(this.package, normalizedPath);
+                partKind = "coreProps";
+                this.rolePaths.corePropsPart = normalizedPath;
+                break;
+            case RelationshipTypes.ExtendedProperties:
+                part = new ExtendedPropsPart(this.package, normalizedPath);
+                partKind = "extendedProps";
+                this.rolePaths.extendedPropsPart = normalizedPath;
+                break;
+            case RelationshipTypes.CustomProperties:
+                part = new CustomPropsPart(this.package, normalizedPath);
+                partKind = "customProps";
+                this.rolePaths.customPropsPart = normalizedPath;
+                break;
+            case RelationshipTypes.Settings:
+                part = new SettingsPart(this.package, normalizedPath);
+                partKind = "settings";
+                this.rolePaths.settingsPart = normalizedPath;
+                break;
+            case RelationshipTypes.Comments:
+                part = new CommentsPart(this.package, normalizedPath, this.parser);
+                partKind = "comments";
+                this.rolePaths.commentsPart = normalizedPath;
+                break;
+            case RelationshipTypes.CommentsExtended:
+                part = new CommentsExtendedPart(this.package, normalizedPath);
+                partKind = "commentsExtended";
+                this.rolePaths.commentsExtendedPart = normalizedPath;
+                break;
+        }
+        if (!part)
+            return null;
+        part.__kind = partKind;
+        this.partsMap[normalizedPath] = part;
+        this.parts.push(part);
+        await part.load();
+        if (part.rels?.length > 0) {
+            const [folder] = splitPath(part.path);
+            await Promise.all(part.rels.map(rel => this.loadRelationshipPart(resolvePath(rel.target, folder), rel.type)));
+        }
+        return part;
+    }
+    collectSnapshotFiles() {
+        const serializedPaths = new Set(this.parts.map(part => normalizePath(part.path)));
+        const resourcePaths = new Set();
+        for (const part of this.parts) {
+            const [folder] = splitPath(part.path);
+            for (const rel of part.rels ?? []) {
+                if (rel.targetMode === "External")
+                    continue;
+                const resolvedPath = normalizePath(resolvePath(rel.target, folder));
+                if (!this.package.get(resolvedPath) || serializedPaths.has(resolvedPath))
+                    continue;
+                resourcePaths.add(resolvedPath);
+            }
+        }
+        return Array.from(resourcePaths).map(path => ({
+            path,
+            buffer: toArrayBuffer(this.package.get(path))
+        }));
+    }
+    serializePart(part) {
+        const base = {
+            kind: part.__kind,
+            path: part.path,
+            rels: part.rels
+        };
+        switch (part.__kind) {
+            case "document":
+                return {
+                    ...base,
+                    body: serializeDocumentBody(part.body)
+                };
+            case "fontTable":
+                return { ...base, fonts: part.fonts };
+            case "numbering":
+                return {
+                    ...base,
+                    numberings: part.numberings,
+                    abstractNumberings: part.abstractNumberings,
+                    bulletPictures: part.bulletPictures,
+                    domNumberings: part.domNumberings
+                };
+            case "styles":
+                return { ...base, styles: part.styles };
+            case "theme":
+                return { ...base, theme: part.theme };
+            case "footnotes":
+            case "endnotes":
+                return { ...base, notes: part.notes };
+            case "header":
+            case "footer":
+                return { ...base, rootElement: part.rootElement };
+            case "coreProps":
+            case "extendedProps":
+            case "customProps":
+                return { ...base, props: part.props };
+            case "settings":
+                return { ...base, settings: part.settings };
+            case "comments":
+                return { ...base, comments: part.comments };
+            case "commentsExtended":
+                return { ...base, comments: part.comments };
+            default:
+                return null;
+        }
+    }
+}
+function normalizeParseOptions(options) {
+    return {
+        breakPages: options?.breakPages ?? defaultOptions.breakPages,
+        debug: options?.debug ?? defaultOptions.debug,
+        ignoreLastRenderedPageBreak: options?.ignoreLastRenderedPageBreak ?? defaultOptions.ignoreLastRenderedPageBreak,
+        inWrapper: options?.inWrapper ?? defaultOptions.inWrapper,
+        trimXmlDeclaration: options?.trimXmlDeclaration ?? defaultOptions.trimXmlDeclaration,
+    };
+}
+function normalizeRenderOptions(options) {
+    return {
+        ...defaultOptions,
+        ...options,
+        useWorkerParser: false,
+        workerUrl: undefined
+    };
+}
+function validateSnapshot(snapshot) {
+    if (!snapshot?.meta)
+        throw new Error("DOCX: Invalid snapshot payload");
+    if (snapshot.meta.version !== 1)
+        throw new Error(`DOCX: Unsupported snapshot version ${snapshot.meta.version}`);
+}
+function validateRenderOptions(snapshot, options) {
+    const parseOptions = snapshot.meta.parseOptions;
+    if (options.breakPages !== parseOptions.breakPages) {
+        throw new Error("DOCX: renderSnapshot() received breakPages that does not match snapshot parse options");
+    }
+    if (options.ignoreLastRenderedPageBreak !== parseOptions.ignoreLastRenderedPageBreak) {
+        throw new Error("DOCX: renderSnapshot() received ignoreLastRenderedPageBreak that does not match snapshot parse options");
+    }
+}
+function serializeDocumentBody(body) {
+    if (!body)
+        return null;
+    return {
+        ...body,
+        children: []
+    };
+}
+function normalizePath(path) {
+    return path.startsWith("/") ? path.substring(1) : path;
+}
+function normalizeFiles(files) {
+    const result = {};
+    for (const [path, file] of Object.entries(files ?? {})) {
+        result[normalizePath(path)] = file;
+    }
+    return result;
+}
+function toArrayBuffer(data) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+}
+async function inputToUint8Array(data) {
+    if (data instanceof Uint8Array)
+        return data.slice();
+    if (data instanceof ArrayBuffer)
+        return new Uint8Array(data);
+    if (ArrayBuffer.isView(data))
+        return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+    if (typeof data?.arrayBuffer === "function")
+        return new Uint8Array(await data.arrayBuffer());
+    throw new Error("Unsupported input type for parseToSnapshot");
+}
+function cloneSerializable(value) {
+    if (typeof structuredClone === "function") {
+        return structuredClone(value);
+    }
+    if (Array.isArray(value)) {
+        return value.map(item => cloneSerializable(item));
+    }
+    if (!value || typeof value !== "object") {
+        return value;
+    }
+    const result = {};
+    for (const [key, entry] of Object.entries(value)) {
+        result[key] = cloneSerializable(entry);
+    }
+    return result;
+}
+
 function parseAsync(data, userOptions) {
     const ops = { ...defaultOptions, ...userOptions };
     return WordDocument.load(data, new DocumentParser(ops), ops);
 }
 async function renderDocument(document, bodyContainer, styleContainer, userOptions) {
     const ops = { ...defaultOptions, ...userOptions };
-    const renderer = new HtmlRenderer(window.document);
+    const renderer = new HtmlRenderer(bodyContainer.ownerDocument ?? window.document);
     return await renderer.render(document, bodyContainer, styleContainer, ops);
 }
 async function renderAsync(data, bodyContainer, styleContainer, userOptions) {
@@ -6735,5 +8087,5 @@ async function renderAsync(data, bodyContainer, styleContainer, userOptions) {
     return doc;
 }
 
-export { defaultOptions, parseAsync, renderAsync, renderDocument };
+export { collectSnapshotTransferables, defaultOptions, parseAsync, parseToSnapshot, renderAsync, renderDocument, renderSnapshot };
 //# sourceMappingURL=docx-preview.mjs.map
