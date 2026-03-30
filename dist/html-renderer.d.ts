@@ -14,7 +14,7 @@ import { ThemePart } from './theme/theme-part';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
-import { VirtualizedRenderer } from './virtualized-renderer';
+import { MountedWindowChange, VirtualizedRenderer } from './virtualized-renderer';
 import { PaginatedPage, PaginatedSection } from './document-pager';
 interface CellPos {
     col: number;
@@ -58,6 +58,7 @@ export declare class HtmlRenderer {
     tasks: Promise<any>[];
     postRenderTasks: any[];
     pageVirtualizer: VirtualizedRenderer;
+    lastMountedWindowSignature: string;
     constructor(htmlDocument: Document);
     render(document: WordDocument, bodyContainer: HTMLElement, styleContainer: HTMLElement, options: Options): Promise<RenderedDocumentHandle>;
     renderTheme(themePart: ThemePart, styleContainer: HTMLElement): void;
@@ -170,6 +171,7 @@ export declare class HtmlRenderer {
         pageIndex: number;
         element: HTMLElement;
     }[];
+    emitMountedPageWindowChange(pages: PaginatedPage[], payload: MountedWindowChange): void;
     collectEndnoteIds(elements: OpenXmlElement[], output: string[]): void;
     estimatePageHeight(props: SectionProperties): number;
     optimizeChildren(children: OpenXmlElement[]): OpenXmlElement[];

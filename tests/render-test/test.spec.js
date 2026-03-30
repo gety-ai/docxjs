@@ -203,6 +203,44 @@ describe("Render document", function () {
 
     scrollHost.remove();
   });
+
+  it("virtualized rendering should emit mounted page window changes", async () => {
+    const path = 'header-footer';
+    const docBlob = await fetch(`/base/tests/render-test/${path}/document.docx`).then(r => r.blob());
+    const scrollHost = document.createElement("div");
+    const div = document.createElement("div");
+    const events = [];
+
+    scrollHost.style.height = "900px";
+    scrollHost.style.overflow = "auto";
+    scrollHost.appendChild(div);
+    document.body.appendChild(scrollHost);
+
+    await docx.renderAsync(docBlob, div, null, {
+      virtualizePages: true,
+      virtualizePagesOverscan: 0,
+      onMountedPageWindowChange: payload => {
+        events.push({
+          pageIndices: payload.pageIndices.slice(),
+          addedPageIndices: payload.addedPageIndices.slice(),
+          removedPageIndices: payload.removedPageIndices.slice()
+        });
+      }
+    });
+
+    await waitFrames(4);
+
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[0].pageIndices.length).toBeGreaterThan(0);
+
+    scrollHost.scrollTop = scrollHost.scrollHeight;
+    await waitFrames(6);
+
+    expect(events.length).toBeGreaterThan(1);
+    expect(events[events.length - 1].pageIndices.join(",")).not.toBe(events[0].pageIndices.join(","));
+
+    scrollHost.remove();
+  });
 });
 
 function formatHTML(text) {
@@ -212,6 +250,9 @@ function formatHTML(text) {
 function normalizeSectionHTML(section) {
   const clone = section.cloneNode(true);
   clone.removeAttribute("data-index");
+  for (const name of ["position", "left", "right", "margin-left", "margin-right", "margin-bottom", "box-sizing", "top"]) {
+    clone.style.removeProperty(name);
+  }
   return formatHTML(clone.outerHTML);
 }
 

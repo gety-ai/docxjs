@@ -23,6 +23,18 @@ export interface Options {
     useWorkerParser: boolean;
     mergeAdjacent: boolean;
     workerUrl?: string | URL;
+    onMountedPageWindowChange?: (payload: {
+        startPageIndex: number;
+        endPageIndex: number;
+        pageIndices: number[];
+        addedPageIndices: number[];
+        removedPageIndices: number[];
+        pages: Array<{
+            pageIndex: number;
+            element: HTMLElement;
+        }>;
+        isScrolling: boolean;
+    }) => void;
     onImageRendered?: (payload: {
         docPrId: string;
         imgEl: HTMLImageElement;
@@ -55,4 +67,3 @@ export const defaultOptions: Options = {
     useWorkerParser: false,
     mergeAdjacent: false
 };
-

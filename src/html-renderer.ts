@@ -23,7 +23,7 @@ import { BaseHeaderFooterPart } from './header-footer/parts';
 import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlComment, WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
-import { VirtualizedRenderer } from './virtualized-renderer';
+import { MountedWindowChange, VirtualizedRenderer } from './virtualized-renderer';
 import { DocumentPager, PaginatedPage, PaginatedSection } from './document-pager';
 
 const ns = {
@@ -86,6 +86,7 @@ export class HtmlRenderer {
 	tasks: Promise<any>[] = [];
 	postRenderTasks: any[] = [];
 	pageVirtualizer: VirtualizedRenderer = null;
+	lastMountedWindowSignature: string = null;
 
 	constructor(public htmlDocument: Document) {
 	}
@@ -177,10 +178,15 @@ export class HtmlRenderer {
 					estimatedSize: page.estimatedHeight
 				})),
 				overscan: this.options.virtualizePagesOverscan,
+				itemGap: this.options.inWrapper ? 30 : 0,
+				centerItems: this.options.inWrapper,
 				renderItem: index => this.renderPage(document.preparePageForRender(pages[index]), document.documentPart.body),
 				onRendered: () => {
 					this.flushPostRenderTasks();
 					this.refreshTabStops();
+				},
+				onWindowChange: payload => {
+					this.emitMountedPageWindowChange(pages, payload);
 				}
 			});
 			this.pageVirtualizer.mount();
@@ -193,6 +199,19 @@ export class HtmlRenderer {
 			} else {
 				appendChildren(bodyContainer, sectionElements);
 			}
+
+			this.emitMountedPageWindowChange(pages, {
+				startIndex: pages[0]?.pageIndex ?? 0,
+				endIndex: pages[pages.length - 1]?.pageIndex ?? 0,
+				indices: pages.map((_, index) => index),
+				addedIndices: pages.map((_, index) => index),
+				removedIndices: [],
+				items: sectionElements.map((element, index) => ({
+					index,
+					element
+				})),
+				isScrolling: false
+			});
 		}
 
 		if (this.commentHighlight && options.renderComments) {
@@ -2073,6 +2092,34 @@ section.${c}>footer { z-index: 1; }
 				pageIndex: Number((element as HTMLElement).dataset.index),
 				element: element as HTMLElement
 			}));
+	}
+
+	emitMountedPageWindowChange(pages: PaginatedPage[], payload: MountedWindowChange) {
+		if (!this.options.onMountedPageWindowChange) {
+			return;
+		}
+
+		const pageIndices = payload.indices.map(index => pages[index]?.pageIndex).filter(index => index != null);
+		const signature = pageIndices.join(",");
+
+		if (signature === this.lastMountedWindowSignature) {
+			return;
+		}
+
+		this.lastMountedWindowSignature = signature;
+
+		this.options.onMountedPageWindowChange({
+			startPageIndex: pageIndices[0] ?? 0,
+			endPageIndex: pageIndices[pageIndices.length - 1] ?? 0,
+			pageIndices,
+			addedPageIndices: payload.addedIndices.map(index => pages[index]?.pageIndex).filter(index => index != null),
+			removedPageIndices: payload.removedIndices.map(index => pages[index]?.pageIndex).filter(index => index != null),
+			pages: payload.items.map(item => ({
+				pageIndex: pages[item.index]?.pageIndex,
+				element: item.element
+			})).filter(item => item.pageIndex != null),
+			isScrolling: payload.isScrolling
+		});
 	}
 
 	collectEndnoteIds(elements: OpenXmlElement[], output: string[]) {

@@ -301,3 +301,50 @@ Notes:
 - Snapshot-backed documents now keep authoritative page metadata and clone each page only when it is actually rendered.
 - Snapshot part materialization is now selective: `styles`, `header/footer`, and `footnotes/endnotes` stay isolated for correctness, while read-mostly parts reuse the structured-cloned payload directly.
 - This keeps snapshot reusability intact while removing the biggest main-thread rehydrate hotspot for virtualized rendering.
+
+## Virtual Scroll Optimization
+
+Date:
+`2026-03-30`
+
+Document:
+`/home/yuche/Documents/large-docx/big-docx-moby-dick.docx`
+
+Scenario:
+- `TEST_DOCX_PATH=/home/yuche/Documents/large-docx/big-docx-moby-dick.docx node scripts/run-benchmark.mjs virtualized-worker`
+
+Before:
+- `parseMs`: `36.9`
+- `renderMs`: `102.7`
+- `totalMs`: `227.8`
+- `elements`: `8398`
+- `mountedPages`: `3`
+- `longTasks.count`: `8`
+- `longTasks.sumMs`: `726`
+- `longTasks.maxMs`: `106`
+- `scrollPassMs`: `24223.3`
+
+After:
+- `parseMs`: `31.7`
+- `renderMs`: `12.6`
+- `totalMs`: `151.5`
+- `elements`: `8397`
+- `mountedPages`: `3`
+- `longTasks.count`: `1`
+- `longTasks.sumMs`: `107`
+- `longTasks.maxMs`: `107`
+- `scrollPassMs`: `23229.6`
+
+Delta:
+- `parseMs`: `-14.1%`
+- `renderMs`: `-87.7%`
+- `totalMs`: `-33.5%`
+- `longTasks.count`: `-87.5%`
+- `longTasks.sumMs`: `-85.3%`
+- `scrollPassMs`: `-4.1%`
+
+Notes:
+- `VirtualizedRenderer` no longer does `replaceChildren()` on every window sync.
+- Mounted pages are kept in a stable absolute-positioned inner container and updated incrementally.
+- Page measurement is frozen during scroll and resumed on idle, using direct `resizeItem()` updates instead of eager `measureElement()` calls.
+- A new mounted page window callback is available so hosts can stop watching the subtree with `MutationObserver`.

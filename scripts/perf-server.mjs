@@ -4,7 +4,7 @@ import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const TEST_DOCX_PATH = "/home/yuche/Downloads/The Routledge Handbook of Translation and Philosophy.docx";
+const DEFAULT_TEST_DOCX_PATH = "/home/yuche/Downloads/The Routledge Handbook of Translation and Philosophy.docx";
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -35,13 +35,14 @@ function normalizeRequestPath(urlPathname) {
   return absolutePath;
 }
 
-export async function startPerfServer(port = 4173) {
+export async function startPerfServer(port = 4173, options = {}) {
+  const testDocxPath = options.testDocxPath || process.env.TEST_DOCX_PATH || DEFAULT_TEST_DOCX_PATH;
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url, `http://${request.headers.host}`);
 
       if (requestUrl.pathname === "/api/test-docx") {
-        const file = await readFile(TEST_DOCX_PATH);
+        const file = await readFile(testDocxPath);
         response.writeHead(200, {
           "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           "Content-Length": file.byteLength

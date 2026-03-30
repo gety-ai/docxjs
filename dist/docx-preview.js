@@ -5234,8 +5234,11 @@
             this.cleanup = null;
             this.elementCache = new Map();
             this.frameId = 0;
-            this.topSpacer = this.createSpacer();
-            this.bottomSpacer = this.createSpacer();
+            this.idleMeasureTimeoutId = 0;
+            this.idleMeasureFrameId = 0;
+            this.lastWindowSignature = null;
+            this.isScrolling = false;
+            this.contentElement = this.createContentElement();
             this.virtualizer = new Virtualizer({
                 count: options.items.length,
                 getScrollElement: () => options.scrollElement,
@@ -5244,31 +5247,53 @@
                 observeElementRect,
                 observeElementOffset,
                 overscan: options.overscan,
-                onChange: () => this.scheduleSync()
+                onChange: (_, sync) => {
+                    this.isScrolling = sync;
+                    this.scheduleSync();
+                    this.scheduleIdleMeasurement(sync ? 120 : 0);
+                }
             });
+            this.virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false;
         }
         mount() {
+            if (!this.contentElement.isConnected) {
+                this.options.hostElement.replaceChildren(this.contentElement);
+            }
             this.cleanup = this.virtualizer._didMount();
             this.virtualizer._willUpdate();
             this.sync();
+            this.scheduleIdleMeasurement(0);
         }
         destroy() {
             if (this.frameId) {
                 cancelAnimationFrame(this.frameId);
                 this.frameId = 0;
             }
+            if (this.idleMeasureTimeoutId) {
+                clearTimeout(this.idleMeasureTimeoutId);
+                this.idleMeasureTimeoutId = 0;
+            }
+            if (this.idleMeasureFrameId) {
+                cancelAnimationFrame(this.idleMeasureFrameId);
+                this.idleMeasureFrameId = 0;
+            }
             this.cleanup?.();
             this.cleanup = null;
-            this.hostElement.replaceChildren();
+            this.options.hostElement.replaceChildren();
+            this.contentElement.replaceChildren();
             this.elementCache.clear();
+            this.lastWindowSignature = null;
         }
         get hostElement() {
             return this.options.hostElement;
         }
-        createSpacer() {
-            return Object.assign(this.options.document.createElement("div"), {
-                ariaHidden: "true"
-            });
+        createContentElement() {
+            const element = this.options.document.createElement("div");
+            element.style.position = "relative";
+            element.style.width = "100%";
+            element.style.minWidth = "0";
+            element.style.boxSizing = "border-box";
+            return element;
         }
         scheduleSync() {
             if (this.frameId) {
@@ -5279,30 +5304,103 @@
                 this.sync();
             });
         }
+        scheduleIdleMeasurement(delay) {
+            if (this.idleMeasureTimeoutId) {
+                clearTimeout(this.idleMeasureTimeoutId);
+                this.idleMeasureTimeoutId = 0;
+            }
+            if (this.idleMeasureFrameId) {
+                cancelAnimationFrame(this.idleMeasureFrameId);
+                this.idleMeasureFrameId = 0;
+            }
+            this.idleMeasureTimeoutId = window.setTimeout(() => {
+                this.idleMeasureTimeoutId = 0;
+                this.idleMeasureFrameId = requestAnimationFrame(() => {
+                    this.idleMeasureFrameId = 0;
+                    if (this.isScrolling) {
+                        this.scheduleIdleMeasurement(120);
+                        return;
+                    }
+                    this.measureMountedItems();
+                });
+            }, delay);
+        }
         sync() {
             const virtualItems = this.virtualizer.getVirtualItems();
-            const nextCache = new Map();
-            const fragment = this.options.document.createDocumentFragment();
-            const first = virtualItems[0];
-            const last = virtualItems[virtualItems.length - 1];
             const totalSize = this.virtualizer.getTotalSize();
-            this.topSpacer.style.height = `${first?.start ?? 0}px`;
-            this.topSpacer.style.width = "1px";
-            this.bottomSpacer.style.height = `${Math.max(0, totalSize - (last?.end ?? 0))}px`;
-            this.bottomSpacer.style.width = "1px";
-            fragment.appendChild(this.topSpacer);
+            const nextIndices = new Set();
+            const addedIndices = [];
+            const removedIndices = [];
+            this.contentElement.style.height = `${Math.max(0, totalSize)}px`;
             for (const item of virtualItems) {
-                const element = this.elementCache.get(item.index) ?? this.options.renderItem(item.index);
-                nextCache.set(item.index, element);
-                fragment.appendChild(element);
+                const existing = this.elementCache.get(item.index);
+                const element = existing ?? this.options.renderItem(item.index);
+                if (!existing) {
+                    this.prepareItemElement(element);
+                    this.elementCache.set(item.index, element);
+                    this.contentElement.appendChild(element);
+                    addedIndices.push(item.index);
+                }
+                else if (!element.isConnected || element.parentElement !== this.contentElement) {
+                    this.contentElement.appendChild(element);
+                }
+                this.positionItemElement(element, item.start);
+                nextIndices.add(item.index);
             }
-            fragment.appendChild(this.bottomSpacer);
-            this.options.hostElement.replaceChildren(fragment);
-            for (const item of virtualItems) {
-                this.virtualizer.measureElement(nextCache.get(item.index));
+            for (const [index, element] of this.elementCache.entries()) {
+                if (nextIndices.has(index)) {
+                    continue;
+                }
+                element.remove();
+                this.elementCache.delete(index);
+                removedIndices.push(index);
             }
-            this.elementCache = nextCache;
+            this.emitWindowChange(virtualItems, addedIndices, removedIndices);
             this.options.onRendered?.();
+        }
+        prepareItemElement(element) {
+            element.style.position = "absolute";
+            element.style.left = "0";
+            element.style.right = this.options.centerItems ? "0" : "";
+            element.style.marginLeft = this.options.centerItems ? "auto" : "";
+            element.style.marginRight = this.options.centerItems ? "auto" : "";
+            element.style.marginBottom = "0";
+            element.style.boxSizing = "border-box";
+        }
+        positionItemElement(element, start) {
+            element.style.top = `${Math.max(0, Math.round(start))}px`;
+        }
+        measureMountedItems() {
+            for (const [index, element] of this.elementCache.entries()) {
+                if (!element.isConnected) {
+                    continue;
+                }
+                const size = Math.ceil(element.getBoundingClientRect().height) + (this.options.itemGap ?? 0);
+                this.virtualizer.resizeItem(index, size);
+            }
+        }
+        emitWindowChange(virtualItems, addedIndices, removedIndices) {
+            const indices = virtualItems.map(item => item.index);
+            const signature = indices.join(",");
+            if (signature === this.lastWindowSignature) {
+                return;
+            }
+            this.lastWindowSignature = signature;
+            if (!indices.length) {
+                return;
+            }
+            this.options.onWindowChange?.({
+                startIndex: indices[0],
+                endIndex: indices[indices.length - 1],
+                indices,
+                addedIndices,
+                removedIndices,
+                items: indices.map(index => ({
+                    index,
+                    element: this.elementCache.get(index)
+                })),
+                isScrolling: this.isScrolling
+            });
         }
         getMountedItems() {
             return Array.from(this.elementCache.entries()).map(([index, element]) => ({ index, element }));
@@ -5640,6 +5738,7 @@
             this.tasks = [];
             this.postRenderTasks = [];
             this.pageVirtualizer = null;
+            this.lastMountedWindowSignature = null;
         }
         async render(document, bodyContainer, styleContainer = null, options) {
             this.document = document;
@@ -5710,10 +5809,15 @@
                         estimatedSize: page.estimatedHeight
                     })),
                     overscan: this.options.virtualizePagesOverscan,
+                    itemGap: this.options.inWrapper ? 30 : 0,
+                    centerItems: this.options.inWrapper,
                     renderItem: index => this.renderPage(document.preparePageForRender(pages[index]), document.documentPart.body),
                     onRendered: () => {
                         this.flushPostRenderTasks();
                         this.refreshTabStops();
+                    },
+                    onWindowChange: payload => {
+                        this.emitMountedPageWindowChange(pages, payload);
                     }
                 });
                 this.pageVirtualizer.mount();
@@ -5727,6 +5831,18 @@
                 else {
                     appendChildren(bodyContainer, sectionElements);
                 }
+                this.emitMountedPageWindowChange(pages, {
+                    startIndex: pages[0]?.pageIndex ?? 0,
+                    endIndex: pages[pages.length - 1]?.pageIndex ?? 0,
+                    indices: pages.map((_, index) => index),
+                    addedIndices: pages.map((_, index) => index),
+                    removedIndices: [],
+                    items: sectionElements.map((element, index) => ({
+                        index,
+                        element
+                    })),
+                    isScrolling: false
+                });
             }
             if (this.commentHighlight && options.renderComments) {
                 CSS.highlights.set(`${this.className}-comments`, this.commentHighlight);
@@ -7127,6 +7243,29 @@ section.${c}>footer { z-index: 1; }
                 pageIndex: Number(element.dataset.index),
                 element: element
             }));
+        }
+        emitMountedPageWindowChange(pages, payload) {
+            if (!this.options.onMountedPageWindowChange) {
+                return;
+            }
+            const pageIndices = payload.indices.map(index => pages[index]?.pageIndex).filter(index => index != null);
+            const signature = pageIndices.join(",");
+            if (signature === this.lastMountedWindowSignature) {
+                return;
+            }
+            this.lastMountedWindowSignature = signature;
+            this.options.onMountedPageWindowChange({
+                startPageIndex: pageIndices[0] ?? 0,
+                endPageIndex: pageIndices[pageIndices.length - 1] ?? 0,
+                pageIndices,
+                addedPageIndices: payload.addedIndices.map(index => pages[index]?.pageIndex).filter(index => index != null),
+                removedPageIndices: payload.removedIndices.map(index => pages[index]?.pageIndex).filter(index => index != null),
+                pages: payload.items.map(item => ({
+                    pageIndex: pages[item.index]?.pageIndex,
+                    element: item.element
+                })).filter(item => item.pageIndex != null),
+                isScrolling: payload.isScrolling
+            });
         }
         collectEndnoteIds(elements, output) {
             if (!elements)
