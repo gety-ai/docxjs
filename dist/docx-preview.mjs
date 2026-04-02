@@ -5227,7 +5227,9 @@ class VirtualizedRenderer {
         this.options = options;
         this.cleanup = null;
         this.elementCache = new Map();
+        this.pendingMeasureIndices = new Set();
         this.frameId = 0;
+        this.pendingMeasureFrameId = 0;
         this.idleMeasureTimeoutId = 0;
         this.idleMeasureFrameId = 0;
         this.lastWindowSignature = null;
@@ -5263,6 +5265,10 @@ class VirtualizedRenderer {
             cancelAnimationFrame(this.frameId);
             this.frameId = 0;
         }
+        if (this.pendingMeasureFrameId) {
+            cancelAnimationFrame(this.pendingMeasureFrameId);
+            this.pendingMeasureFrameId = 0;
+        }
         if (this.idleMeasureTimeoutId) {
             clearTimeout(this.idleMeasureTimeoutId);
             this.idleMeasureTimeoutId = 0;
@@ -5276,6 +5282,7 @@ class VirtualizedRenderer {
         this.options.hostElement.replaceChildren();
         this.contentElement.replaceChildren();
         this.elementCache.clear();
+        this.pendingMeasureIndices.clear();
         this.lastWindowSignature = null;
     }
     get hostElement() {
@@ -5319,6 +5326,20 @@ class VirtualizedRenderer {
             });
         }, delay);
     }
+    schedulePendingMeasurement(indices) {
+        for (const index of indices) {
+            this.pendingMeasureIndices.add(index);
+        }
+        if (!this.pendingMeasureIndices.size || this.pendingMeasureFrameId) {
+            return;
+        }
+        this.pendingMeasureFrameId = requestAnimationFrame(() => {
+            this.pendingMeasureFrameId = 0;
+            const indices = Array.from(this.pendingMeasureIndices);
+            this.pendingMeasureIndices.clear();
+            this.measureIndices(indices);
+        });
+    }
     sync() {
         const virtualItems = this.virtualizer.getVirtualItems();
         const totalSize = this.virtualizer.getTotalSize();
@@ -5347,7 +5368,11 @@ class VirtualizedRenderer {
             }
             element.remove();
             this.elementCache.delete(index);
+            this.pendingMeasureIndices.delete(index);
             removedIndices.push(index);
+        }
+        if (addedIndices.length) {
+            this.schedulePendingMeasurement(addedIndices);
         }
         this.emitWindowChange(virtualItems, addedIndices, removedIndices);
         this.options.onRendered?.();
@@ -5365,12 +5390,18 @@ class VirtualizedRenderer {
         element.style.top = `${Math.max(0, Math.round(start))}px`;
     }
     measureMountedItems() {
-        for (const [index, element] of this.elementCache.entries()) {
-            if (!element.isConnected) {
+        this.measureIndices(this.elementCache.keys());
+    }
+    measureIndices(indices) {
+        for (const index of indices) {
+            const element = this.elementCache.get(index);
+            if (!element?.isConnected) {
                 continue;
             }
             const size = Math.ceil(element.getBoundingClientRect().height) + (this.options.itemGap ?? 0);
-            this.virtualizer.resizeItem(index, size);
+            if (size > 0) {
+                this.virtualizer.resizeItem(index, size);
+            }
         }
     }
     emitWindowChange(virtualItems, addedIndices, removedIndices) {

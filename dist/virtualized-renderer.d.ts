@@ -31,7 +31,9 @@ export declare class VirtualizedRenderer {
     private virtualizer;
     private cleanup;
     private elementCache;
+    private pendingMeasureIndices;
     private frameId;
+    private pendingMeasureFrameId;
     private idleMeasureTimeoutId;
     private idleMeasureFrameId;
     private contentElement;
@@ -44,10 +46,12 @@ export declare class VirtualizedRenderer {
     private createContentElement;
     private scheduleSync;
     private scheduleIdleMeasurement;
+    private schedulePendingMeasurement;
     private sync;
     private prepareItemElement;
     private positionItemElement;
     private measureMountedItems;
+    private measureIndices;
     private emitWindowChange;
     getMountedItems(): {
         index: number;

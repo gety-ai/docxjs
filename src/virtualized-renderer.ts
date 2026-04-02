@@ -40,7 +40,9 @@ export class VirtualizedRenderer {
 	private virtualizer: Virtualizer<HTMLElement, HTMLElement>;
 	private cleanup: () => void = null;
 	private elementCache = new Map<number, HTMLElement>();
+	private pendingMeasureIndices = new Set<number>();
 	private frameId = 0;
+	private pendingMeasureFrameId = 0;
 	private idleMeasureTimeoutId = 0;
 	private idleMeasureFrameId = 0;
 	private contentElement: HTMLElement;
@@ -83,6 +85,11 @@ export class VirtualizedRenderer {
 			this.frameId = 0;
 		}
 
+		if (this.pendingMeasureFrameId) {
+			cancelAnimationFrame(this.pendingMeasureFrameId);
+			this.pendingMeasureFrameId = 0;
+		}
+
 		if (this.idleMeasureTimeoutId) {
 			clearTimeout(this.idleMeasureTimeoutId);
 			this.idleMeasureTimeoutId = 0;
@@ -98,6 +105,7 @@ export class VirtualizedRenderer {
 		this.options.hostElement.replaceChildren();
 		this.contentElement.replaceChildren();
 		this.elementCache.clear();
+		this.pendingMeasureIndices.clear();
 		this.lastWindowSignature = null;
 	}
 
@@ -151,6 +159,23 @@ export class VirtualizedRenderer {
 		}, delay);
 	}
 
+	private schedulePendingMeasurement(indices: number[]) {
+		for (const index of indices) {
+			this.pendingMeasureIndices.add(index);
+		}
+
+		if (!this.pendingMeasureIndices.size || this.pendingMeasureFrameId) {
+			return;
+		}
+
+		this.pendingMeasureFrameId = requestAnimationFrame(() => {
+			this.pendingMeasureFrameId = 0;
+			const indices = Array.from(this.pendingMeasureIndices);
+			this.pendingMeasureIndices.clear();
+			this.measureIndices(indices);
+		});
+	}
+
 	private sync() {
 		const virtualItems = this.virtualizer.getVirtualItems();
 		const totalSize = this.virtualizer.getTotalSize();
@@ -184,7 +209,12 @@ export class VirtualizedRenderer {
 
 			element.remove();
 			this.elementCache.delete(index);
+			this.pendingMeasureIndices.delete(index);
 			removedIndices.push(index);
+		}
+
+		if (addedIndices.length) {
+			this.schedulePendingMeasurement(addedIndices);
 		}
 
 		this.emitWindowChange(virtualItems, addedIndices, removedIndices);
@@ -206,13 +236,22 @@ export class VirtualizedRenderer {
 	}
 
 	private measureMountedItems() {
-		for (const [index, element] of this.elementCache.entries()) {
-			if (!element.isConnected) {
+		this.measureIndices(this.elementCache.keys());
+	}
+
+	private measureIndices(indices: Iterable<number>) {
+		for (const index of indices) {
+			const element = this.elementCache.get(index);
+
+			if (!element?.isConnected) {
 				continue;
 			}
 
 			const size = Math.ceil(element.getBoundingClientRect().height) + (this.options.itemGap ?? 0);
-			this.virtualizer.resizeItem(index, size);
+
+			if (size > 0) {
+				this.virtualizer.resizeItem(index, size);
+			}
 		}
 	}
 
